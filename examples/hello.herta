@@ -1,0 +1,6 @@
+// Минимальный пример программы на Herta.
+
+fn main() int32 {
+    print("Hello, Herta!");
+    return 0;
+}
