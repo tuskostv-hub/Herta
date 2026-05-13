@@ -1,0 +1,15 @@
+// Модуль Math — экспортирует арифметические утилиты.
+
+module Math;
+
+pub fn add(a: int32, b: int32) int32 {
+    return a + b;
+}
+
+pub fn sub(a: int32, b: int32) int32 {
+    return a - b;
+}
+
+fn double(x: int32) int32 {   // приватная, не экспортируется
+    return x + x;
+}

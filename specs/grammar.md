@@ -24,7 +24,8 @@ whitespace    = " " | "\t" | "\r" | "\n" ;
 ```
 fn        let       var       return    if        else
 while     break     continue  struct    type      namespace
-impl      true      false     print     input     exit      panic
+impl      module    import    pub       true      false
+print     input     exit      panic
 ```
 
 > `self` **не** является ключевым словом — это обычный идентификатор, используемый по соглашению как имя первого параметра инстанс-метода (см. §3.2.5).
@@ -121,18 +122,55 @@ line_comment  = "//" { any_char_except_newline } newline ;
 
 ### 3.1 Структура программы
 
-Программа — это один исходный файл (модуль), содержащий объявления верхнего уровня.
+Программа состоит из одного или нескольких **модулей** — отдельных
+исходных файлов. Каждый файл обязан начинаться с объявления модуля,
+за которым могут следовать импорты и объявления верхнего уровня.
 Выражения и инструкции допускаются **только** внутри тел функций.
 
 ```
-program        = { top_level_decl } EOF ;
+program        = module_decl
+                 { import_decl }
+                 { top_level_decl }
+                 EOF ;
 
-top_level_decl = fn_decl
-               | struct_decl
-               | type_alias_decl
-               | namespace_decl
-               | impl_decl ;
+module_decl    = "module" identifier ";" ;
+import_decl    = "import" identifier ";" ;
+
+top_level_decl = [ "pub" ] ( fn_decl
+                           | struct_decl
+                           | type_alias_decl
+                           | namespace_decl
+                           | impl_decl ) ;
 ```
+
+Префикс `pub` помечает объявление как экспортируемое; объявления без `pub`
+видны только внутри своего модуля. Префикс `pub` к `impl_decl` не применяется —
+видимость регулируется на уровне отдельных методов внутри `impl` (см. §3.2.5).
+
+#### Модуль и импорт
+
+```
+// файл math.herta — модуль Math
+module Math;
+
+pub fn add(a: int32, b: int32) int32 {
+    return a + b;
+}
+
+fn helper() int32 { return 0; }   // не экспортируется
+```
+
+```
+// файл main.herta — модуль Main
+module Main;
+import Math;
+
+fn main() int32 {
+    return Math.add(1, 2);
+}
+```
+
+Правила объявления модуля и импорта подробно описаны в semantics.md §13.
 
 ### 3.2 Объявления верхнего уровня
 
@@ -192,7 +230,7 @@ type Name = string;
 #### Методы структур (impl-блоки)
 
 ```
-impl_decl       = "impl" identifier "{" { fn_decl } "}" ;
+impl_decl       = "impl" identifier "{" { [ "pub" ] fn_decl } "}" ;
 ```
 
 Блок `impl T { ... }` добавляет функции, ассоциированные с типом `T`

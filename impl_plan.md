@@ -8,9 +8,10 @@
 |--------------------------------------|--------------------------------------|
 | Вывод типов (`:=`)                   | **Да** — синтаксис и семантика в specs |
 | Неявное приведение типов (widening)  | **Да** — `types.md §5.4`              |
-| Методы структур (`impl`)             | **Да** — `grammar.md §3.2.5`, `semantics.md §13.1` |
-| IR + оптимизации (constant folding)  | **Да** — отдельная фаза между semantic и codegen (см. §3 этого плана) |
-| Остальные (generics, ADT, лямбды, модули, перегрузка) | Нет |
+| Методы структур (`impl`)             | **Да** — `grammar.md §3.2.5`, `semantics.md §13.1.методы` |
+| Полноценные модули (`module`/`import`/`pub`) | **Да** (поднято в обязательное требование) — `grammar.md §3.1`, `semantics.md §13` |
+| IR + оптимизации (constant folding)  | **Да** — отдельная фаза между semantic и codegen (см. «Что дальше») |
+| Остальные (generics, ADT, лямбды, перегрузка) | Нет |
 
 ---
 
@@ -141,10 +142,12 @@ compile_commands.json
 
 **Ключевые слова (синтаксические):**
 ```
-fn  let  var  return  if  else  while  break  continue  struct  type  namespace  impl  true  false
+fn  let  var  return  if  else  while  break  continue
+struct  type  namespace  impl  module  import  pub
+true  false
 ```
 
-(15 ключевых слов. `impl` добавлен для методов структур — см. `grammar.md §3.2.5`.)
+(18 ключевых слов: `impl` для методов, `module` / `import` / `pub` для модульной системы.)
 
 > Примечание про `print` / `input` / `exit` / `panic` и имена базовых типов (`int8`..`int64`, `uint8`..`uint64`, `float32`, `float64`, `bool`, `string`, `void`):
 > формально в §2.1 grammar `print/input/exit/panic` помечены как keywords, а имена типов — нет. Чтобы не плодить десятки `TokenKind`, **в лексере** они все тегируются как обычный `Identifier`. Их «зарезервированность» обеспечит семантический анализатор (запретит переопределение). Это решение нужно отразить в `report.md`.
@@ -199,6 +202,7 @@ enum class TokenKind : std::uint8_t {
     KwFn, KwLet, KwVar, KwReturn,
     KwIf, KwElse, KwWhile, KwBreak, KwContinue,
     KwStruct, KwType, KwNamespace, KwImpl,
+    KwModule, KwImport, KwPub,
     KwTrue, KwFalse,
     // Операторы
     Plus, Minus, Star, Slash, Percent,
@@ -375,7 +379,7 @@ private:
 - [ ] `inc/herta/common/diagnostic.hpp` + `src/common/diagnostic.cpp` — `Diagnostic`, `DiagnosticSink`, форматирование.
 - [ ] `inc/herta/lexer/token.hpp` + `src/lexer/token.cpp` — `TokenKind`, `Token`, `to_string(TokenKind)`.
 - [ ] `inc/herta/lexer/lexer.hpp` + `src/lexer/lexer.cpp` — реализация `Lexer::tokenize()` по алгоритму выше.
-- [ ] Таблица ключевых слов: `static const std::unordered_map<std::string_view, TokenKind>` либо `if`-каскад / `constexpr` массив (для 15 ключевых слов — массив с линейным поиском оптимален).
+- [ ] Таблица ключевых слов: `static const std::unordered_map<std::string_view, TokenKind>` либо `if`-каскад / `constexpr` массив (для 18 ключевых слов — массив с линейным поиском оптимален).
 - [ ] `main.cpp` — поддержка `--dump-tokens` и базовая обработка CLI.
 - [ ] Подключить `src/lexer/*.cpp` в `CMakeLists.txt` (в `herta_core`).
 
@@ -415,16 +419,39 @@ private:
 
 ## Что дальше (превью)
 
-Полный pipeline с учётом «Доп»:
+Полный pipeline с учётом «Доп» и обязательных модулей:
 
 ```
-исходный код → [Lexer] → [Parser] → [Semantic] → [Lowering→IR] → [Optimizer] → [Codegen] → exe
+точка входа (main.herta)
+        ↓
+   [Lexer per file]      ← каждый модуль лексируется отдельно
+        ↓
+   [Parser per file]     ← AST модуля; собирает список импортов
+        ↓
+[Module loader]          ← резолвит import-ы, грузит и разбирает зависимости,
+        ↓                  строит граф модулей, проверяет циклы
+[Semantic per module]    ← по топологическому порядку; type checker,
+        ↓                  резолвинг `Module.x`, проверка `pub`-видимости
+   [Lowering→IR]
+        ↓
+   [Optimizer]           ← constant folding (+ DCE если успеем)
+        ↓
+   [Codegen]             ← NASM x86-64 либо LLVM IR
+        ↓
+   Исполняемый файл
 ```
 
-- **Этап 3 — парсер.** Recursive Descent, отдельный subparser для выражений по таблице приоритетов §3.4 grammar. Парсит и `impl`-блоки (просто список `fn_decl` внутри).
-- **Этап 4 — семантика.** Символьные таблицы со scope-стеком, type checker с реализацией неявных приведений (§5.4 types.md), проверка mutability (`let`/`var`), резолвинг методов (lookup по типу `obj`/`T`).
-- **Этап 5 — IR (lowering).** Линейный трёхадресный код: `t = a OP b`, `t = call f(args)`, `goto L`, `if t goto L`, `label L`. Печать в текстовом виде для отладки (`--dump-ir`).
-- **Этап 6 — оптимизатор IR.** На старте — **constant folding** (свёртка константных выражений). По возможности — простой DCE (dead code elimination).
-- **Этап 7 — кодогенерация.** NASM x86-64 либо LLVM IR — решение фиксируем в `specs/codegen.md` до начала этапа. Соглашение о вызовах — System V AMD64 ABI.
+- **Этап 3 — парсер.** Recursive Descent, отдельный subparser для выражений по таблице приоритетов §3.4 grammar. Парсит `module`/`import`/`pub`-префиксы, `impl`-блоки (список `fn_decl` внутри), всё остальное по grammar.md.
+- **Этап 3.5 — module loader.** Отдельный модуль `module_loader`: получает корневой файл, парсит его, по списку `import`-ов рекурсивно загружает зависимости. Поиск файла — в каталоге корневого исходника по имени `Name.herta`. Детектирует циклы (DFS с цветами white/gray/black), повторные импорты, отсутствие файла, несовпадение `module Name;` ↔ имени файла. Результат — упорядоченный список модулей и `Map<ModuleName, ParsedAST>`.
+- **Этап 4 — семантика.** Обходит модули в порядке зависимости. Двухпроходный: сначала собирает в каждом модуле «таблицу экспортов» (имена с `pub` + их сигнатуры), потом полная проверка тел функций с резолвингом `Module.x` и валидацией `pub`-видимости. Здесь же: scope-стек, type checker с неявными приведениями (§5.4 types.md), `let`/`var`, разрешение методов.
+- **Этап 5 — IR (lowering).** Линейный трёхадресный код: `t = a OP b`, `t = call f(args)`, `goto L`, `if t goto L`, `label L`. Имена символов из разных модулей мангалируются: `ModuleName.func` → `ModuleName__func`. Печать в текстовом виде (`--dump-ir`).
+- **Этап 6 — оптимизатор IR.** На старте — **constant folding** (свёртка константных выражений). По возможности — простой DCE.
+- **Этап 7 — кодогенерация.** NASM x86-64 либо LLVM IR — решение фиксируем в `specs/codegen.md` до начала этапа. Соглашение о вызовах — System V AMD64 ABI. Каждый модуль компилируется в свой объектный файл, линкуются в один бинарь.
 
-Каждый из этапов 3-7 будет детализирован в этом плане по мере завершения предыдущего.
+Изменение CLI:
+```
+myc <root.herta> [-o <output>] [--dump-tokens] [--dump-ast] [--dump-ir]
+```
+Несколько файлов вручную не передаются — компилятор сам обходит зависимости от корневого. `--dump-tokens` / `--dump-ast` дампят **только корневой** модуль (для отладки достаточно).
+
+Каждый из этапов 3-7 будет детализирован по мере завершения предыдущего.

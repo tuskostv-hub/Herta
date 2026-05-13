@@ -1,5 +1,7 @@
 // Пример из спецификации: сортировка пузырьком.
 
+module bubble_sort;
+
 namespace Utils {
     type Index = int32;
 

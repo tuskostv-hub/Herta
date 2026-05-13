@@ -25,6 +25,9 @@ std::string_view to_string(TokenKind k) noexcept {
         case TokenKind::KwType: return "KwType";
         case TokenKind::KwNamespace: return "KwNamespace";
         case TokenKind::KwImpl: return "KwImpl";
+        case TokenKind::KwModule: return "KwModule";
+        case TokenKind::KwImport: return "KwImport";
+        case TokenKind::KwPub: return "KwPub";
         case TokenKind::KwTrue: return "KwTrue";
         case TokenKind::KwFalse: return "KwFalse";
         case TokenKind::Plus: return "Plus";

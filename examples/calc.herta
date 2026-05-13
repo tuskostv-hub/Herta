@@ -1,0 +1,12 @@
+// Корневой модуль calc — использует модуль Math.
+
+module calc;
+import Math;
+
+fn main() int32 {
+    let x: int32 = Math.add(2, 3);
+    let y: int32 = Math.sub(10, 4);
+    print(x);
+    print(y);
+    return 0;
+}

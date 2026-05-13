@@ -33,6 +33,9 @@ enum class TokenKind : std::uint8_t {
     KwType,
     KwNamespace,
     KwImpl,
+    KwModule,
+    KwImport,
+    KwPub,
     KwTrue,
     KwFalse,
 
