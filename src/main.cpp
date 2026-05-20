@@ -1,6 +1,8 @@
 import std;
 import herta.common;
 import herta.lexer;
+import herta.ast;
+import herta.parser;
 
 namespace {
 
@@ -57,13 +59,40 @@ int main(int argc, char** argv) {
 
     herta::common::DiagnosticSink sink;
 
+    // --- Lex ---
     herta::lexer::Lexer lex(*src, sink);
-    auto tokens = lex.tokenize();
+    auto tokens_res = lex.tokenize();
 
-    if (args->dump_tokens && tokens) {
-        for (const auto& t : *tokens) {
+    if (args->dump_tokens && tokens_res) {
+        for (const auto& t : *tokens_res) {
             std::cout << herta::lexer::to_string(t) << '\n';
         }
+        if (!args->dump_ast) {
+            if (sink.has_errors()) {
+                sink.print_all(std::cerr);
+                return 1;
+            }
+            return 0;
+        }
+    }
+
+    if (!tokens_res) {
+        sink.print_all(std::cerr);
+        return 1;
+    }
+
+    // --- Parse ---
+    herta::parser::Parser parser(*tokens_res, src->name(), sink);
+    auto prog_res = parser.parse_program();
+
+    if (!prog_res) {
+        sink.print_all(std::cerr);
+        return 1;
+    }
+
+    if (args->dump_ast) {
+        herta::ast::dump_ast(*prog_res, std::cout);
+        return 0;
     }
 
     if (sink.has_errors()) {

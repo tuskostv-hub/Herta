@@ -45,16 +45,19 @@ Herta/
 │   ├── lexer/
 │   │   └── lexer.cppm          # module `herta.lexer`:
 │   │                           #   TokenKind, Token, to_string, Lexer
-│   ├── parser/                 # пустые stubs для следующих этапов
-│   │   └── .gitkeep
+│   ├── parser/
+│   │   ├── ast.cppm            # module `herta.ast`:
+│   │   │                       #   узлы AST + dump_ast
+│   │   └── parser.cppm         # module `herta.parser`:
+│   │                           #   рекурсивный спуск, Parser::parse_program
 │   ├── semantic/
 │   │   └── .gitkeep
 │   └── codegen/
 │       └── .gitkeep
 └── tests/
     ├── CMakeLists.txt
-    └── lexer/
-        └── test_tokens.cpp     # inline assertions, без внешних fixture-файлов
+    ├── lexer/test_tokens.cpp   # 40+ inline кейсов лексера
+    └── parser/test_parser.cpp  # 40+ inline кейсов парсера
 ```
 
 > Никаких заголовков — проект целиком на C++23 named modules. Каждый
