@@ -12,14 +12,18 @@
 
 ## Требования
 
-- CMake ≥ 3.25
-- `g++` ≥ 13 (поддержка C++23)
+- CMake ≥ 4.0
+- Ninja
+- Clang ≥ 22 с libc++ (для `import std;`)
 - POSIX-совместимая ОС (Linux, WSL)
+
+Компилятор написан на C++23 и использует модуль стандартной библиотеки
+(`import std;`), поэтому набор тулчейна жёстко зафиксирован.
 
 ## Сборка
 
 ```bash
-cmake -S . -B build
+cmake -G Ninja -S . -B build -DCMAKE_CXX_COMPILER=clang++-22
 cmake --build build
 ```
 
@@ -28,9 +32,9 @@ cmake --build build
 ## Запуск
 
 ```bash
-./build/myc <source.herta>             # компиляция
+./build/myc <source.herta>                # компиляция
 ./build/myc <source.herta> --dump-tokens  # вывести поток токенов
-./build/myc <source.herta> --dump-ast     # вывести AST
+./build/myc <source.herta> --dump-ast     # вывести AST (на этапе парсера)
 ./build/myc <source.herta> -o <output>    # указать имя выходного файла
 ```
 
@@ -48,5 +52,5 @@ inc/herta/   — публичные заголовки фаз компилято
 src/         — реализация (lexer, parser, semantic, codegen)
 specs/       — спецификация языка
 examples/    — примеры программ
-tests/       — unit и golden тесты
+tests/       — unit-тесты фаз
 ```
