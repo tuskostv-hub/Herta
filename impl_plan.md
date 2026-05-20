@@ -37,43 +37,31 @@ Herta/
 │   ├── arith.herta
 │   ├── bubble_sort.herta
 │   └── ...
-├── inc/                        # публичные заголовки компилятора (.hpp)
-│   └── herta/
-│       ├── common/
-│       │   ├── source_location.hpp  # struct SourceLocation { file, line, col, offset }
-│       │   ├── diagnostic.hpp       # struct Diagnostic + класс DiagnosticSink
-│       │   ├── source_file.hpp      # struct SourceFile: содержимое + имя
-│       │   └── expected.hpp         # alias-обёртки, если нужны
-│       ├── lexer/
-│       │   ├── token.hpp            # enum TokenKind, struct Token
-│       │   └── lexer.hpp            # class Lexer (herta::lexer::)
-│       ├── parser/                  # пустые stubs для следующих этапов
-│       │   └── .gitkeep
-│       ├── semantic/
-│       │   └── .gitkeep
-│       └── codegen/
-│           └── .gitkeep
-├── src/                        # реализация (.cpp)
+├── src/                        # C++23 named modules + entry point
 │   ├── main.cpp                # точка входа: парсинг CLI, оркестрация фаз
 │   ├── common/
-│   │   ├── diagnostic.cpp
-│   │   └── source_file.cpp
+│   │   └── common.cppm         # module `herta.common`:
+│   │                           #   SourceLocation, SourceFile, Diagnostic, DiagnosticSink
 │   ├── lexer/
-│   │   ├── token.cpp           # to_string(TokenKind), to_string(Token)
-│   │   └── lexer.cpp
-│   ├── parser/
+│   │   └── lexer.cppm          # module `herta.lexer`:
+│   │                           #   TokenKind, Token, to_string, Lexer
+│   ├── parser/                 # пустые stubs для следующих этапов
 │   │   └── .gitkeep
 │   ├── semantic/
 │   │   └── .gitkeep
 │   └── codegen/
 │       └── .gitkeep
-└── tests/                      # тесты (рекомендуется с самого начала)
+└── tests/
     ├── CMakeLists.txt
     └── lexer/
         └── test_tokens.cpp     # inline assertions, без внешних fixture-файлов
 ```
 
-> Разделение `inc/` ↔ `src/`: заголовки публичные для всех фаз компилятора и тестов, реализация скрыта в `src/`. Включения в коде делаются как `#include "herta/lexer/lexer.hpp"` — однозначно и без относительных путей.
+> Никаких заголовков — проект целиком на C++23 named modules. Каждый
+> модуль = один `.cppm`-файл с interface + implementation в одном месте.
+> Потребители делают `import herta.common;` / `import herta.lexer;`.
+> Запрещены любые `#include` в коде проекта (макросы вроде `EXIT_SUCCESS`
+> заменены на литералы — макросы не проходят через границу модуля).
 
 > Тесты: используем простой self-contained подход без сторонних библиотек (т.к. они под запретом без согласования) — функции `assert_*` в `tests/test_main.cpp` либо `ctest add_test` с golden-сравнением через `diff`. Окончательное решение — в шаге 1.7.
 

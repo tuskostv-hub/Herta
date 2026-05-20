@@ -70,15 +70,13 @@ add_compile_options(
 # -----------------------------------------------------------------------------
 option(HERTA_BUILD_TESTS "Build tests" ON)
 
-set(HERTA_CORE_SOURCES
-    src/common/diagnostic.cpp
-    src/common/source_file.cpp
-    src/lexer/token.cpp
-    src/lexer/lexer.cpp
+add_library(herta_core STATIC)
+target_sources(herta_core
+    PUBLIC
+        FILE_SET cxx_modules TYPE CXX_MODULES FILES
+            src/common/common.cppm
+            src/lexer/lexer.cppm
 )
-
-add_library(herta_core STATIC ${HERTA_CORE_SOURCES})
-target_include_directories(herta_core PUBLIC ${CMAKE_SOURCE_DIR}/inc)
 
 add_executable(myc src/main.cpp)
 target_link_libraries(myc PRIVATE herta_core)

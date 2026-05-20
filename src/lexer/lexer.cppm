@@ -1,12 +1,135 @@
-#include "herta/lexer/lexer.hpp"
+// Module `herta.lexer` — лексический анализатор языка Herta.
+// Покрывает грамматику §2 specs/grammar.md.
+
+export module herta.lexer;
 
 import std;
+import herta.common;
 
 namespace herta::lexer {
 
-namespace {
+// ===========================================================================
+// TokenKind / Token
+// ===========================================================================
 
-using herta::common::SourceLocation;
+export enum class TokenKind : std::uint8_t {
+    // Спец
+    Eof,
+    Invalid,
+
+    // Литералы и идентификатор
+    IntLiteral,
+    FloatLiteral,
+    StringLiteral,
+    Identifier,
+
+    // Ключевые слова (18 шт — см. grammar.md §2.1)
+    KwFn,
+    KwLet,
+    KwVar,
+    KwReturn,
+    KwIf,
+    KwElse,
+    KwWhile,
+    KwBreak,
+    KwContinue,
+    KwStruct,
+    KwType,
+    KwNamespace,
+    KwImpl,
+    KwModule,
+    KwImport,
+    KwPub,
+    KwTrue,
+    KwFalse,
+
+    // Арифметика
+    Plus, Minus, Star, Slash, Percent,
+
+    // Сравнения
+    EqEq, BangEq, Lt, Gt, LtEq, GtEq,
+
+    // Логика
+    AmpAmp, PipePipe, Bang,
+
+    // Присваивание / вывод типа / возвращаемый тип
+    Eq, ColonEq, Arrow,
+
+    // Разделители
+    Colon, Comma, Semicolon, Dot,
+
+    // Скобки
+    LParen, RParen,
+    LBrace, RBrace,
+    LBracket, RBracket,
+};
+
+export struct Token {
+    TokenKind kind = TokenKind::Invalid;
+    std::string_view lexeme;
+    herta::common::SourceLocation loc;
+};
+
+// Человеко-читаемое имя вида токена (для --dump-tokens и диагностики).
+export std::string_view to_string(TokenKind k) noexcept;
+
+// Полное представление: "<line>:<col>  <KIND>  '<lexeme>'".
+export std::string to_string(const Token& t);
+
+// ===========================================================================
+// Lexer
+// ===========================================================================
+
+// При обнаружении ошибки добавляет диагностику в sink и останавливается
+// (поведение «остановка на первой ошибке» из ТЗ).
+export class Lexer {
+public:
+    Lexer(const herta::common::SourceFile& src,
+          herta::common::DiagnosticSink& sink);
+
+    // Возвращает все токены до Eof включительно.
+    // На ошибке — std::unexpected{}; детали в sink.
+    std::expected<std::vector<Token>, std::monostate> tokenize();
+
+private:
+    // Курсор / источник.
+    bool at_end() const noexcept;
+    char peek(std::size_t lookahead = 0) const noexcept;
+    char advance() noexcept;
+    bool match(char c) noexcept;
+    herta::common::SourceLocation current_loc() const noexcept;
+
+    void skip_whitespace_and_comments();
+
+    // Конструктор токена по диапазону [start_pos, pos_).
+    Token make_token(TokenKind kind,
+                     std::size_t start_pos,
+                     herta::common::SourceLocation start_loc) const;
+
+    Token scan_identifier_or_keyword(herta::common::SourceLocation start,
+                                     std::size_t start_pos);
+    Token scan_number(herta::common::SourceLocation start,
+                      std::size_t start_pos);
+    Token scan_string(herta::common::SourceLocation start,
+                      std::size_t start_pos);
+    Token scan_punct_or_op(herta::common::SourceLocation start,
+                           std::size_t start_pos);
+
+    void error(std::string message, herta::common::SourceLocation loc);
+
+    const herta::common::SourceFile& src_;
+    herta::common::DiagnosticSink& sink_;
+    std::size_t pos_ = 0;
+    std::uint32_t line_ = 1;
+    std::uint32_t col_ = 1;
+    bool fatal_ = false;
+};
+
+// ===========================================================================
+// Implementation
+// ===========================================================================
+
+namespace {
 
 constexpr bool is_letter(char c) noexcept {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
@@ -55,7 +178,75 @@ TokenKind keyword_lookup(std::string_view text) noexcept {
     return TokenKind::Identifier;
 }
 
-}  // namespace
+}  // anonymous namespace
+
+std::string_view to_string(TokenKind k) noexcept {
+    switch (k) {
+        case TokenKind::Eof: return "Eof";
+        case TokenKind::Invalid: return "Invalid";
+        case TokenKind::IntLiteral: return "IntLiteral";
+        case TokenKind::FloatLiteral: return "FloatLiteral";
+        case TokenKind::StringLiteral: return "StringLiteral";
+        case TokenKind::Identifier: return "Identifier";
+        case TokenKind::KwFn: return "KwFn";
+        case TokenKind::KwLet: return "KwLet";
+        case TokenKind::KwVar: return "KwVar";
+        case TokenKind::KwReturn: return "KwReturn";
+        case TokenKind::KwIf: return "KwIf";
+        case TokenKind::KwElse: return "KwElse";
+        case TokenKind::KwWhile: return "KwWhile";
+        case TokenKind::KwBreak: return "KwBreak";
+        case TokenKind::KwContinue: return "KwContinue";
+        case TokenKind::KwStruct: return "KwStruct";
+        case TokenKind::KwType: return "KwType";
+        case TokenKind::KwNamespace: return "KwNamespace";
+        case TokenKind::KwImpl: return "KwImpl";
+        case TokenKind::KwModule: return "KwModule";
+        case TokenKind::KwImport: return "KwImport";
+        case TokenKind::KwPub: return "KwPub";
+        case TokenKind::KwTrue: return "KwTrue";
+        case TokenKind::KwFalse: return "KwFalse";
+        case TokenKind::Plus: return "Plus";
+        case TokenKind::Minus: return "Minus";
+        case TokenKind::Star: return "Star";
+        case TokenKind::Slash: return "Slash";
+        case TokenKind::Percent: return "Percent";
+        case TokenKind::EqEq: return "EqEq";
+        case TokenKind::BangEq: return "BangEq";
+        case TokenKind::Lt: return "Lt";
+        case TokenKind::Gt: return "Gt";
+        case TokenKind::LtEq: return "LtEq";
+        case TokenKind::GtEq: return "GtEq";
+        case TokenKind::AmpAmp: return "AmpAmp";
+        case TokenKind::PipePipe: return "PipePipe";
+        case TokenKind::Bang: return "Bang";
+        case TokenKind::Eq: return "Eq";
+        case TokenKind::ColonEq: return "ColonEq";
+        case TokenKind::Arrow: return "Arrow";
+        case TokenKind::Colon: return "Colon";
+        case TokenKind::Comma: return "Comma";
+        case TokenKind::Semicolon: return "Semicolon";
+        case TokenKind::Dot: return "Dot";
+        case TokenKind::LParen: return "LParen";
+        case TokenKind::RParen: return "RParen";
+        case TokenKind::LBrace: return "LBrace";
+        case TokenKind::RBrace: return "RBrace";
+        case TokenKind::LBracket: return "LBracket";
+        case TokenKind::RBracket: return "RBracket";
+    }
+    return "?";
+}
+
+std::string to_string(const Token& t) {
+    std::ostringstream os;
+    os << t.loc.line << ':' << t.loc.column << "  "
+       << to_string(t.kind) << "  '" << t.lexeme << '\'';
+    return os.str();
+}
+
+// ---------------------------------------------------------------------------
+// Lexer
+// ---------------------------------------------------------------------------
 
 Lexer::Lexer(const herta::common::SourceFile& src,
              herta::common::DiagnosticSink& sink)
@@ -87,8 +278,8 @@ bool Lexer::match(char c) noexcept {
     return true;
 }
 
-SourceLocation Lexer::current_loc() const noexcept {
-    return SourceLocation{
+herta::common::SourceLocation Lexer::current_loc() const noexcept {
+    return herta::common::SourceLocation{
         .line = line_,
         .column = col_,
         .offset = static_cast<std::uint32_t>(pos_),
@@ -97,7 +288,7 @@ SourceLocation Lexer::current_loc() const noexcept {
 
 Token Lexer::make_token(TokenKind kind,
                         std::size_t start_pos,
-                        SourceLocation start_loc) const {
+                        herta::common::SourceLocation start_loc) const {
     auto contents = src_.contents();
     return Token{
         .kind = kind,
@@ -106,7 +297,7 @@ Token Lexer::make_token(TokenKind kind,
     };
 }
 
-void Lexer::error(std::string message, SourceLocation loc) {
+void Lexer::error(std::string message, herta::common::SourceLocation loc) {
     sink_.report(herta::common::Diagnostic{
         .file = std::string(src_.name()),
         .loc = loc,
@@ -130,7 +321,7 @@ void Lexer::skip_whitespace_and_comments() {
     }
 }
 
-Token Lexer::scan_identifier_or_keyword(SourceLocation start,
+Token Lexer::scan_identifier_or_keyword(herta::common::SourceLocation start,
                                         std::size_t start_pos) {
     while (!at_end() && is_letter_or_digit(peek())) advance();
     auto lexeme = src_.contents().substr(start_pos, pos_ - start_pos);
@@ -141,7 +332,8 @@ Token Lexer::scan_identifier_or_keyword(SourceLocation start,
     };
 }
 
-Token Lexer::scan_number(SourceLocation start, std::size_t start_pos) {
+Token Lexer::scan_number(herta::common::SourceLocation start,
+                         std::size_t start_pos) {
     // Шестнадцатеричный литерал: "0x" hex_digit+
     if (peek() == '0' && (peek(1) == 'x' || peek(1) == 'X')) {
         advance();  // '0'
@@ -181,7 +373,8 @@ Token Lexer::scan_number(SourceLocation start, std::size_t start_pos) {
     return make_token(TokenKind::IntLiteral, start_pos, start);
 }
 
-Token Lexer::scan_string(SourceLocation start, std::size_t start_pos) {
+Token Lexer::scan_string(herta::common::SourceLocation start,
+                         std::size_t start_pos) {
     advance();  // открывающая "
     while (true) {
         if (at_end()) {
@@ -217,7 +410,8 @@ Token Lexer::scan_string(SourceLocation start, std::size_t start_pos) {
     }
 }
 
-Token Lexer::scan_punct_or_op(SourceLocation start, std::size_t start_pos) {
+Token Lexer::scan_punct_or_op(herta::common::SourceLocation start,
+                              std::size_t start_pos) {
     char c = advance();
     switch (c) {
         // Однозначные односимвольные.
@@ -255,7 +449,7 @@ Token Lexer::scan_punct_or_op(SourceLocation start, std::size_t start_pos) {
             if (match('=')) return make_token(TokenKind::ColonEq, start_pos, start);
             return make_token(TokenKind::Colon, start_pos, start);
 
-        // Только двусимвольные.
+        // Только двусимвольные — одиночный символ — ошибка.
         case '&':
             if (match('&')) return make_token(TokenKind::AmpAmp, start_pos, start);
             error("expected '&&', got lone '&'", start);

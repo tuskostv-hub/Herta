@@ -1,9 +1,6 @@
-#include "herta/common/diagnostic.hpp"
-#include "herta/common/source_file.hpp"
-#include "herta/lexer/lexer.hpp"
-#include "herta/lexer/token.hpp"
-
 import std;
+import herta.common;
+import herta.lexer;
 
 namespace {
 
@@ -49,13 +46,13 @@ int main(int argc, char** argv) {
     if (!args) {
         std::cerr << "error: " << args.error() << '\n';
         print_usage(std::cerr);
-        return EXIT_FAILURE;
+        return 1;
     }
 
     auto src = herta::common::SourceFile::load(args->input);
     if (!src) {
         std::cerr << "error: " << src.error() << '\n';
-        return EXIT_FAILURE;
+        return 1;
     }
 
     herta::common::DiagnosticSink sink;
@@ -71,8 +68,8 @@ int main(int argc, char** argv) {
 
     if (sink.has_errors()) {
         sink.print_all(std::cerr);
-        return EXIT_FAILURE;
+        return 1;
     }
 
-    return EXIT_SUCCESS;
+    return 0;
 }

@@ -1,10 +1,8 @@
 // Тесты лексера. Покрывают грамматику §2 spec/grammar.md.
 
-#include "herta/common/diagnostic.hpp"
-#include "herta/common/source_file.hpp"
-#include "herta/lexer/lexer.hpp"
-
 import std;
+import herta.common;
+import herta.lexer;
 
 using herta::common::DiagnosticSink;
 using herta::common::SourceFile;
@@ -284,8 +282,8 @@ int main() {
 
     if (failures == 0) {
         std::cout << "all lexer tests passed\n";
-        return EXIT_SUCCESS;
+        return 0;
     }
     std::cerr << failures << " test(s) failed\n";
-    return EXIT_FAILURE;
+    return 1;
 }
