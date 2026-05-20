@@ -1,6 +1,6 @@
 #include "herta/common/diagnostic.hpp"
 
-#include <ostream>
+import std;
 
 namespace herta::common {
 

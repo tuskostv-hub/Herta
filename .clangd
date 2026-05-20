@@ -1,0 +1,12 @@
+CompileFlags:
+  Add:
+    - -std=c++23
+    - -stdlib=libc++
+    - -Wall
+    - -Wextra
+    - -Wpedantic
+
+Diagnostics:
+  # `import std;` makes "missing include" warnings noisy/incorrect.
+  Suppress:
+    - missing-includes

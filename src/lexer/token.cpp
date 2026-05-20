@@ -1,6 +1,6 @@
 #include "herta/lexer/token.hpp"
 
-#include <sstream>
+import std;
 
 namespace herta::lexer {
 

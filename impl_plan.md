@@ -70,8 +70,7 @@ Herta/
 └── tests/                      # тесты (рекомендуется с самого начала)
     ├── CMakeLists.txt
     └── lexer/
-        ├── test_tokens.cpp
-        └── fixtures/           # .herta-файлы и ожидаемые .tokens
+        └── test_tokens.cpp     # inline assertions, без внешних fixture-файлов
 ```
 
 > Разделение `inc/` ↔ `src/`: заголовки публичные для всех фаз компилятора и тестов, реализация скрыта в `src/`. Включения в коде делаются как `#include "herta/lexer/lexer.hpp"` — однозначно и без относительных путей.
@@ -124,7 +123,7 @@ compile_commands.json
 
 ### 1.6 Чек-лист этапа 1
 
-- [ ] Создать каталоги: `inc/herta/{common,lexer,parser,semantic,codegen}`, `src/{common,lexer,parser,semantic,codegen}`, `examples/`, `tests/lexer/fixtures/`.
+- [ ] Создать каталоги: `inc/herta/{common,lexer,parser,semantic,codegen}`, `src/{common,lexer,parser,semantic,codegen}`, `examples/`, `tests/lexer/`.
 - [ ] Положить `.gitkeep` в пустые `inc/herta/{parser,semantic,codegen}` и `src/{parser,semantic,codegen}`.
 - [ ] Написать `CMakeLists.txt` (корень и `tests/`).
 - [ ] Написать `.gitignore`, минимальный `README.md`.
@@ -385,28 +384,24 @@ private:
 
 ### 2.8 Тесты лексера
 
-Минимум — golden-тесты на `examples/`:
+Один self-contained файл с inline-проверками (без внешних .tokens-фикстур —
+golden-сравнение оказалось избыточным для этой фазы).
 
-- [ ] `tests/lexer/test_tokens.cpp` — функция: для каждого `.herta`-файла в фикстурах прогоняет лексер и сравнивает с `.tokens`-файлом.
-- [ ] Фикстуры:
-  - `empty.herta` → только `Eof`.
-  - `keywords.herta` → каждое ключевое слово по разу.
-  - `idents.herta` → `x`, `_foo`, `Bar2`, `__`.
-  - `ints.herta` → `0`, `42`, `1000`, `0xFF`, `0x0`, `0xAbCdEf`.
-  - `floats.herta` → `3.14`, `0.0`, `1.5e10`, `2.0E-3`, `1.23e+5`.
-  - `strings.herta` → `"hello"`, `"a\nb"`, `"tab\there"`, `"\\"`, `"\""`.
-  - `ops.herta` → все операторы и разделители.
-  - `comments.herta` → строки с `//`, гарантировать отсутствие токенов от них.
-  - `full.herta` → `examples/bubble_sort.herta` целиком.
-  - **Ошибки** — отдельные файлы, ожидаемая диагностика:
-    - `err_unterminated_string.herta` — `"hello`
-    - `err_bad_escape.herta` — `"\q"`
-    - `err_bad_hex.herta` — `0x`
-    - `err_lone_amp.herta` — `a & b`
-    - `err_newline_in_string.herta` — `"a` + `\n` + `b"`
-    - `err_invalid_char.herta` — `@`
+- [x] `tests/lexer/test_tokens.cpp` — функции-помощники `check_seq` / `check_error`,
+      покрывает категории:
+  - пустой ввод, пробелы, комментарии
+  - идентификаторы и builtins/имена типов (как `Identifier`)
+  - все 18 ключевых слов
+  - целые (decimal/hex), вещественные (с экспонентами)
+  - граница `1.` / `p.x`
+  - строки с escape-последовательностями
+  - все 27 операторов и разделителей с maximal munch
+  - полная программа `module hello; fn main() ...`
+  - отслеживание `line:column`
+  - ошибки: незакрытая строка, перевод строки в строке, плохой escape,
+    `0x` без цифр, `0xZ`, одиночные `&`/`|`, неизвестный символ, экспонента без цифры
 
-- [ ] Регистрация целей в CTest: `add_test(NAME lexer_tokens COMMAND lexer_tests)`.
+- [x] Регистрация в CTest: `add_test(NAME lexer.tokens COMMAND test_lexer)`.
 
 ### 2.9 Готовность этапа 2 — критерий
 

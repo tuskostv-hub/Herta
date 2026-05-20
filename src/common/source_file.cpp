@@ -1,8 +1,6 @@
 #include "herta/common/source_file.hpp"
 
-#include <fstream>
-#include <sstream>
-#include <system_error>
+import std;
 
 namespace herta::common {
 

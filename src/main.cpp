@@ -1,13 +1,9 @@
-#include <cstdlib>
-#include <iostream>
-#include <string>
-#include <string_view>
-#include <vector>
-
 #include "herta/common/diagnostic.hpp"
 #include "herta/common/source_file.hpp"
 #include "herta/lexer/lexer.hpp"
 #include "herta/lexer/token.hpp"
+
+import std;
 
 namespace {
 
@@ -78,6 +74,5 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    // TODO: parser, semantic, codegen — следующие этапы.
     return EXIT_SUCCESS;
 }
