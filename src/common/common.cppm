@@ -71,7 +71,11 @@ public:
 
     bool has_errors() const noexcept { return !diags_.empty(); }
 
-    std::span<const Diagnostic> diagnostics() const noexcept {
+    // Возвращает прямую ссылку на внутренний вектор. Получатель не должен
+    // удерживать ссылку через последующий вызов report() (это может
+    // спровоцировать реаллокацию). Span-версия была заменена на ссылку,
+    // чтобы было очевидно, что время жизни связано с самим Sink.
+    const std::vector<Diagnostic>& diagnostics() const noexcept {
         return diags_;
     }
 

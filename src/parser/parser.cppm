@@ -879,25 +879,28 @@ std::unique_ptr<ast::Expr> Parser::parse_postfix_expr() {
     auto e = parse_primary_expr();
     if (!e) return nullptr;
     while (true) {
-        if (match(TokenKind::Dot)) {
+        if (check(TokenKind::Dot)) {
+            auto dot_loc = current().loc;
+            advance();  // '.'
             if (!check(TokenKind::Identifier)) {
                 error("expected field name after '.'");
                 return nullptr;
             }
             auto name = std::string(current().lexeme);
-            auto loc = current().loc;
             advance();
             auto f = std::make_unique<ast::FieldExpr>();
-            f->loc = loc;
+            f->loc = dot_loc;
             f->base = std::move(e);
             f->field = std::move(name);
             e = std::move(f);
-        } else if (match(TokenKind::LBracket)) {
+        } else if (check(TokenKind::LBracket)) {
+            auto bracket_loc = current().loc;
+            advance();  // '['
             auto idx = parse_expr();
             if (!idx) return nullptr;
             if (!expect(TokenKind::RBracket, "']'")) return nullptr;
             auto ix = std::make_unique<ast::IndexExpr>();
-            ix->loc = e->loc;
+            ix->loc = bracket_loc;
             ix->base = std::move(e);
             ix->index = std::move(idx);
             e = std::move(ix);
