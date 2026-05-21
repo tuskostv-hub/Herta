@@ -3,6 +3,7 @@ import herta.common;
 import herta.lexer;
 import herta.ast;
 import herta.parser;
+import herta.semantic;
 
 namespace {
 
@@ -96,6 +97,14 @@ int main(int argc, char** argv) {
     }
 
     if (sink.has_errors()) {
+        sink.print_all(std::cerr);
+        return 1;
+    }
+
+    // --- Semantic ---
+    herta::semantic::SemanticAnalyzer sema(*prog_res, src->name(), sink);
+    bool sema_ok = sema.analyze();
+    if (!sema_ok || sink.has_errors()) {
         sink.print_all(std::cerr);
         return 1;
     }

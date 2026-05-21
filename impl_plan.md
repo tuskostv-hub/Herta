@@ -52,13 +52,15 @@ Herta/
 │   │   └── parser.cppm         # module `herta.parser`:
 │   │                           #   рекурсивный спуск, Parser::parse_program
 │   ├── semantic/
-│   │   └── .gitkeep
+│   │   └── semantic.cppm       # module `herta.semantic`:
+│   │                           #   Type, Symbol, Scope, SemanticAnalyzer
 │   └── codegen/
 │       └── .gitkeep
 └── tests/
     ├── CMakeLists.txt
-    ├── lexer/test_tokens.cpp   # 40+ inline кейсов лексера
-    └── parser/test_parser.cpp  # 40+ inline кейсов парсера
+    ├── lexer/test_tokens.cpp        # 40+ кейсов лексера
+    ├── parser/test_parser.cpp       # 40+ кейсов парсера
+    └── semantic/test_semantic.cpp   # 60+ кейсов семантики
 ```
 
 > Никаких заголовков — проект целиком на C++23 named modules. Каждый
@@ -427,7 +429,7 @@ Pipeline (однофайловая компиляция):
 ```
 
 - **Этап 3 — парсер.** ✓ Готов. Recursive Descent, отдельный subparser для выражений по таблице приоритетов §3.4 grammar. Парсит `module`/`import`/`pub`-префиксы (хранятся в AST для будущего), `impl`-блоки, всё остальное по grammar.md.
-- **Этап 4 — семантика.** Symbol table со scope-стеком, type checker с неявными приведениями (§5.4 types.md), проверка mutability (`let`/`var`), разрешение методов, проверка `return` во всех путях, валидация `break`/`continue` внутри циклов. `import`-декларации в текущей версии **только парсятся**, в скоп ничего не добавляют (однофайловая компиляция); `module Name;` запоминается для диагностики.
+- **Этап 4 — семантика.** ✓ Готов (v1). Symbol table со scope-стеком, lexical scoping с shadowing, type checker с неявными приведениями (§5.4 types.md), литерал-narrowing (`let x: int8 = 42`), проверка mutability (`let`/`var`), валидация `break`/`continue` внутри циклов, проверка типов условий `if`/`while`, проверка типа возврата. **Не реализованы:** `impl`-методы (TODO v2), межмодульный `import` (TODO для «Доп»), exhaustive return-path analysis (всегда требуется явный `return` в конце пути — но компилятор пока не падает если его нет).
 - **Этап 5 — IR (lowering).** Линейный трёхадресный код: `t = a OP b`, `t = call f(args)`, `goto L`, `if t goto L`, `label L`. Печать в текстовом виде (`--dump-ir`).
 - **Этап 6 — оптимизатор IR.** На старте — **constant folding**. По возможности — простой DCE.
 - **Этап 7 — кодогенерация.** NASM x86-64 либо LLVM IR — решение фиксируем в `specs/codegen.md` до начала этапа. Соглашение о вызовах — System V AMD64 ABI.

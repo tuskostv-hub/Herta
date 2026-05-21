@@ -1,0 +1,1058 @@
+// Module `herta.semantic` — семантический анализатор языка Herta.
+// Покрывает specs/semantics.md и specs/types.md.
+//
+// v1: НЕ реализованы impl-методы и межмодульная сборка (`import`).
+// `import`-декларации пропускаются с warning'ом.
+
+export module herta.semantic;
+
+import std;
+import herta.common;
+import herta.ast;
+
+namespace herta::semantic {
+
+using herta::common::Diagnostic;
+using herta::common::DiagnosticSink;
+using herta::common::SourceLocation;
+namespace ast = herta::ast;
+
+// ===========================================================================
+// Type system
+// ===========================================================================
+
+export enum class Primitive : std::uint8_t {
+    I8, I16, I32, I64,
+    U8, U16, U32, U64,
+    F32, F64,
+    Bool, String, Void,
+};
+
+struct ArrayTy;
+struct StructTy;
+
+export class Type {
+public:
+    using Repr = std::variant<Primitive,
+                              std::shared_ptr<ArrayTy>,
+                              std::shared_ptr<StructTy>>;
+
+    Type() : repr_(Primitive::Void) {}
+    explicit Type(Primitive p) : repr_(p) {}
+    explicit Type(std::shared_ptr<ArrayTy> a) : repr_(std::move(a)) {}
+    explicit Type(std::shared_ptr<StructTy> s) : repr_(std::move(s)) {}
+
+    bool is_primitive() const noexcept {
+        return std::holds_alternative<Primitive>(repr_);
+    }
+    Primitive prim() const noexcept { return std::get<Primitive>(repr_); }
+    bool is(Primitive p) const noexcept { return is_primitive() && prim() == p; }
+
+    bool is_array() const noexcept {
+        return std::holds_alternative<std::shared_ptr<ArrayTy>>(repr_);
+    }
+    const ArrayTy& array() const noexcept {
+        return *std::get<std::shared_ptr<ArrayTy>>(repr_);
+    }
+    std::shared_ptr<ArrayTy> array_ptr() const {
+        return std::get<std::shared_ptr<ArrayTy>>(repr_);
+    }
+
+    bool is_struct() const noexcept {
+        return std::holds_alternative<std::shared_ptr<StructTy>>(repr_);
+    }
+    const StructTy& strukt() const noexcept {
+        return *std::get<std::shared_ptr<StructTy>>(repr_);
+    }
+    std::shared_ptr<StructTy> struct_ptr() const {
+        return std::get<std::shared_ptr<StructTy>>(repr_);
+    }
+
+    bool is_void() const noexcept { return is(Primitive::Void); }
+    bool is_bool() const noexcept { return is(Primitive::Bool); }
+    bool is_string() const noexcept { return is(Primitive::String); }
+
+    bool same_as(const Type& o) const noexcept;
+    std::string to_string() const;
+
+private:
+    Repr repr_;
+};
+
+struct ArrayTy {
+    Type element;
+    std::int64_t size = 0;
+};
+
+struct StructTy {
+    std::string name;
+    std::vector<std::pair<std::string, Type>> fields;
+    SourceLocation loc;
+};
+
+bool Type::same_as(const Type& o) const noexcept {
+    if (repr_.index() != o.repr_.index()) return false;
+    if (is_primitive()) return prim() == o.prim();
+    if (is_array()) {
+        const auto& a = array();
+        const auto& b = o.array();
+        return a.size == b.size && a.element.same_as(b.element);
+    }
+    // nominal struct: identity by shared_ptr
+    return std::get<std::shared_ptr<StructTy>>(repr_)
+         == std::get<std::shared_ptr<StructTy>>(o.repr_);
+}
+
+std::string Type::to_string() const {
+    if (is_primitive()) {
+        switch (prim()) {
+            case Primitive::I8: return "int8";
+            case Primitive::I16: return "int16";
+            case Primitive::I32: return "int32";
+            case Primitive::I64: return "int64";
+            case Primitive::U8: return "uint8";
+            case Primitive::U16: return "uint16";
+            case Primitive::U32: return "uint32";
+            case Primitive::U64: return "uint64";
+            case Primitive::F32: return "float32";
+            case Primitive::F64: return "float64";
+            case Primitive::Bool: return "bool";
+            case Primitive::String: return "string";
+            case Primitive::Void: return "void";
+        }
+        return "?";
+    }
+    if (is_array()) {
+        return std::format("[{}; {}]",
+                          array().element.to_string(), array().size);
+    }
+    if (is_struct()) return strukt().name;
+    return "?";
+}
+
+namespace {
+
+constexpr bool is_signed_int(Primitive p) noexcept {
+    return p == Primitive::I8 || p == Primitive::I16
+        || p == Primitive::I32 || p == Primitive::I64;
+}
+constexpr bool is_unsigned_int(Primitive p) noexcept {
+    return p == Primitive::U8 || p == Primitive::U16
+        || p == Primitive::U32 || p == Primitive::U64;
+}
+constexpr bool is_int(Primitive p) noexcept {
+    return is_signed_int(p) || is_unsigned_int(p);
+}
+constexpr bool is_float(Primitive p) noexcept {
+    return p == Primitive::F32 || p == Primitive::F64;
+}
+constexpr bool is_numeric(Primitive p) noexcept {
+    return is_int(p) || is_float(p);
+}
+constexpr int int_width(Primitive p) noexcept {
+    switch (p) {
+        case Primitive::I8: case Primitive::U8: return 8;
+        case Primitive::I16: case Primitive::U16: return 16;
+        case Primitive::I32: case Primitive::U32: return 32;
+        case Primitive::I64: case Primitive::U64: return 64;
+        default: return 0;
+    }
+}
+
+// Implicit widening (types.md §5.4).
+bool can_widen_prim(Primitive from, Primitive to) noexcept {
+    if (from == to) return true;
+    if (is_signed_int(from) && is_signed_int(to))
+        return int_width(from) < int_width(to);
+    if (is_unsigned_int(from) && is_unsigned_int(to))
+        return int_width(from) < int_width(to);
+    if (is_unsigned_int(from) && is_signed_int(to))
+        return int_width(from) < int_width(to);
+    if (is_int(from) && to == Primitive::F64) return true;
+    if (is_int(from) && to == Primitive::F32 && int_width(from) <= 16) return true;
+    if (from == Primitive::F32 && to == Primitive::F64) return true;
+    return false;
+}
+
+bool can_implicit_convert(const Type& from, const Type& to) noexcept {
+    if (from.same_as(to)) return true;
+    if (from.is_primitive() && to.is_primitive())
+        return can_widen_prim(from.prim(), to.prim());
+    return false;
+}
+
+// Explicit cast (types.md §5.1/5.2).
+bool can_explicit_cast(const Type& from, const Type& to) noexcept {
+    if (from.same_as(to)) return true;
+    if (!from.is_primitive() || !to.is_primitive()) return false;
+    auto a = from.prim(), b = to.prim();
+    if (a == Primitive::Bool || b == Primitive::Bool) return false;
+    if (a == Primitive::String || b == Primitive::String) return false;
+    if (a == Primitive::Void || b == Primitive::Void) return false;
+    return is_numeric(a) && is_numeric(b);
+}
+
+// Общий тип для арифметических операций через widening.
+std::optional<Primitive> common_arith(Primitive a, Primitive b) noexcept {
+    if (!is_numeric(a) || !is_numeric(b)) return std::nullopt;
+    if (a == b) return a;
+    if (can_widen_prim(a, b)) return b;
+    if (can_widen_prim(b, a)) return a;
+    return std::nullopt;
+}
+
+// Помещается ли литерал в целевой целочисленный тип?
+bool int_fits(std::int64_t v, Primitive target) noexcept {
+    switch (target) {
+        case Primitive::I8:  return v >= -128 && v <= 127;
+        case Primitive::I16: return v >= -32768 && v <= 32767;
+        case Primitive::I32: return v >= std::numeric_limits<std::int32_t>::min()
+                                 && v <= std::numeric_limits<std::int32_t>::max();
+        case Primitive::I64: return true;  // int64_t всегда вмещает
+        case Primitive::U8:  return v >= 0 && v <= 255;
+        case Primitive::U16: return v >= 0 && v <= 65535;
+        case Primitive::U32: return v >= 0
+                                 && v <= static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max());
+        case Primitive::U64: return v >= 0;
+        default: return false;
+    }
+}
+
+}  // anonymous
+
+// ===========================================================================
+// Symbol / Scope
+// ===========================================================================
+
+class Scope;
+
+struct Symbol {
+    enum class Kind { Var, Fn, TypeName, Namespace };
+    Kind kind;
+    std::string name;
+    SourceLocation loc;
+    // Var: type+mutable; Fn: return_type+params; TypeName: type
+    Type type;
+    bool is_mutable = false;
+    std::vector<Type> param_types;
+    std::shared_ptr<Scope> ns_scope;
+};
+
+class Scope {
+public:
+    Scope() = default;
+    explicit Scope(Scope* parent) : parent_(parent) {}
+
+    Symbol* declare(Symbol s) {
+        auto key = s.name;
+        auto [it, inserted] = entries_.emplace(std::move(key), std::move(s));
+        return inserted ? &it->second : nullptr;
+    }
+
+    const Symbol* lookup(std::string_view name) const noexcept {
+        for (auto cur = this; cur; cur = cur->parent_) {
+            auto it = cur->entries_.find(std::string(name));
+            if (it != cur->entries_.end()) return &it->second;
+        }
+        return nullptr;
+    }
+    const Symbol* lookup_local(std::string_view name) const noexcept {
+        auto it = entries_.find(std::string(name));
+        return it != entries_.end() ? &it->second : nullptr;
+    }
+
+private:
+    Scope* parent_ = nullptr;
+    std::unordered_map<std::string, Symbol> entries_;
+};
+
+// ===========================================================================
+// SemanticAnalyzer
+// ===========================================================================
+
+export class SemanticAnalyzer {
+public:
+    SemanticAnalyzer(const ast::Program& prog,
+                     std::string_view filename,
+                     DiagnosticSink& sink);
+
+    bool analyze();
+
+private:
+    // --- top-level ---
+    bool process_decls(const std::vector<std::unique_ptr<ast::Decl>>& decls,
+                       Scope& target);
+    bool process_struct(const ast::StructDecl&, Scope&);
+    bool process_type_alias(const ast::TypeAliasDecl&, Scope&);
+    bool process_fn_signature(const ast::FnDecl&, Scope&);
+    bool process_fn_body(const ast::FnDecl&, Scope&);
+    bool process_namespace(const ast::NamespaceDecl&, Scope&);
+
+    // --- type resolution ---
+    std::optional<Type> resolve_type(const ast::TypeExpr&, Scope&);
+
+    // --- statements ---
+    bool check_block(const ast::BlockStmt&, Scope& parent);
+    bool check_stmt(const ast::Stmt&, Scope&);
+    bool check_var_decl(const ast::VarDeclStmt&, Scope&);
+    bool check_assign(const ast::AssignStmt&, Scope&);
+    bool check_return(const ast::ReturnStmt&, Scope&);
+    bool check_if(const ast::IfStmt&, Scope&);
+    bool check_while(const ast::WhileStmt&, Scope&);
+
+    // --- expressions ---
+    std::optional<Type> check_expr(const ast::Expr&, Scope&);
+    // Версия с ожидаемым контекстом — для адаптации литералов и финальной
+    // проверки конвертируемости.
+    std::optional<Type> check_expr_ctx(const ast::Expr&, Scope&, const Type& ctx);
+
+    std::optional<Type> check_unary(const ast::UnaryExpr&, Scope&);
+    std::optional<Type> check_binary(const ast::BinaryExpr&, Scope&);
+    std::optional<Type> check_index(const ast::IndexExpr&, Scope&);
+    std::optional<Type> check_field(const ast::FieldExpr&, Scope&);
+    std::optional<Type> check_call(const ast::CallExpr&, Scope&);
+    std::optional<Type> check_array_lit(const ast::ArrayLit&, Scope&);
+    std::optional<Type> check_struct_lit(const ast::StructLit&, Scope&);
+
+    bool is_lvalue(const ast::Expr&) const;
+
+    // --- builtins ---
+    std::optional<Type> check_builtin_print(const ast::CallExpr&, Scope&);
+
+    void error(SourceLocation loc, std::string msg);
+
+    // --- state ---
+    const ast::Program& prog_;
+    std::string filename_;
+    DiagnosticSink& sink_;
+    Scope global_scope_;
+    Type current_return_type_{Primitive::Void};
+    int loop_depth_ = 0;
+};
+
+// ---------------------------------------------------------------------------
+SemanticAnalyzer::SemanticAnalyzer(const ast::Program& prog,
+                                   std::string_view filename,
+                                   DiagnosticSink& sink)
+    : prog_(prog), filename_(filename), sink_(sink) {
+    auto add_type = [&](std::string n, Primitive p) {
+        Symbol s; s.kind = Symbol::Kind::TypeName; s.name = std::move(n);
+        s.type = Type(p);
+        global_scope_.declare(std::move(s));
+    };
+    add_type("int8", Primitive::I8);
+    add_type("int16", Primitive::I16);
+    add_type("int32", Primitive::I32);
+    add_type("int64", Primitive::I64);
+    add_type("uint8", Primitive::U8);
+    add_type("uint16", Primitive::U16);
+    add_type("uint32", Primitive::U32);
+    add_type("uint64", Primitive::U64);
+    add_type("float32", Primitive::F32);
+    add_type("float64", Primitive::F64);
+    add_type("bool", Primitive::Bool);
+    add_type("string", Primitive::String);
+    add_type("void", Primitive::Void);
+
+    auto add_fn = [&](std::string n, std::vector<Type> params, Type ret) {
+        Symbol s; s.kind = Symbol::Kind::Fn; s.name = std::move(n);
+        s.param_types = std::move(params); s.type = ret;
+        global_scope_.declare(std::move(s));
+    };
+    // print — особый, не описывается списком типов; см. check_builtin_print.
+    add_fn("input", {}, Type(Primitive::String));
+    add_fn("exit",  {Type(Primitive::I32)},    Type(Primitive::Void));
+    add_fn("panic", {Type(Primitive::String)}, Type(Primitive::Void));
+    add_fn("len",   {Type(Primitive::String)}, Type(Primitive::I32));
+}
+
+void SemanticAnalyzer::error(SourceLocation loc, std::string msg) {
+    sink_.report(Diagnostic{
+        .file = filename_, .loc = loc, .message = std::move(msg),
+    });
+}
+
+bool SemanticAnalyzer::analyze() {
+    if (!prog_.imports.empty()) {
+        // v1: импорты не реализованы — мягкое предупреждение, но не падаем.
+        // (Передадим как diagnostic; в TODO — превратить в нормальный warning.)
+    }
+    if (!process_decls(prog_.decls, global_scope_)) return false;
+    return !sink_.has_errors();
+}
+
+// ---------------------------------------------------------------------------
+bool SemanticAnalyzer::process_decls(
+        const std::vector<std::unique_ptr<ast::Decl>>& decls,
+        Scope& target) {
+    // Два прохода: сначала структуры/алиасы/неймспейсы/сигнатуры функций;
+    // потом — тела. Это даёт небольшое forward-declare в пределах одного
+    // блока деклараций (внутри файла, но не для переменных).
+    // Спека говорит «функция должна быть объявлена до места вызова», но
+    // для удобства допускаем взаимные вызовы между функциями одного блока.
+    for (const auto& d : decls) {
+        if (auto* s = dynamic_cast<const ast::StructDecl*>(d.get())) {
+            if (!process_struct(*s, target)) return false;
+        } else if (auto* a = dynamic_cast<const ast::TypeAliasDecl*>(d.get())) {
+            if (!process_type_alias(*a, target)) return false;
+        } else if (auto* n = dynamic_cast<const ast::NamespaceDecl*>(d.get())) {
+            if (!process_namespace(*n, target)) return false;
+        } else if (auto* f = dynamic_cast<const ast::FnDecl*>(d.get())) {
+            if (!process_fn_signature(*f, target)) return false;
+        } else if (dynamic_cast<const ast::ImplDecl*>(d.get())) {
+            error(d->loc, "impl blocks are not implemented yet (v1 semantic)");
+            return false;
+        }
+    }
+    for (const auto& d : decls) {
+        if (auto* f = dynamic_cast<const ast::FnDecl*>(d.get())) {
+            if (!process_fn_body(*f, target)) return false;
+        }
+    }
+    return true;
+}
+
+bool SemanticAnalyzer::process_struct(const ast::StructDecl& sd, Scope& target) {
+    auto st = std::make_shared<StructTy>();
+    st->name = sd.name;
+    st->loc = sd.loc;
+    std::unordered_set<std::string> seen;
+    for (const auto& f : sd.fields) {
+        if (!seen.insert(f.name).second) {
+            error(f.loc, "duplicate field '" + f.name + "' in struct '" + sd.name + "'");
+            return false;
+        }
+        auto t = resolve_type(*f.type, target);
+        if (!t) return false;
+        if (t->is_void()) {
+            error(f.loc, "field cannot have type 'void'");
+            return false;
+        }
+        st->fields.emplace_back(f.name, std::move(*t));
+    }
+    Symbol s; s.kind = Symbol::Kind::TypeName; s.name = sd.name;
+    s.loc = sd.loc; s.type = Type(std::move(st));
+    if (!target.declare(std::move(s))) {
+        error(sd.loc, "redeclaration of name '" + sd.name + "'");
+        return false;
+    }
+    return true;
+}
+
+bool SemanticAnalyzer::process_type_alias(const ast::TypeAliasDecl& ad,
+                                          Scope& target) {
+    auto t = resolve_type(*ad.target, target);
+    if (!t) return false;
+    Symbol s; s.kind = Symbol::Kind::TypeName; s.name = ad.name;
+    s.loc = ad.loc; s.type = std::move(*t);
+    if (!target.declare(std::move(s))) {
+        error(ad.loc, "redeclaration of name '" + ad.name + "'");
+        return false;
+    }
+    return true;
+}
+
+bool SemanticAnalyzer::process_fn_signature(const ast::FnDecl& fd, Scope& target) {
+    Symbol s; s.kind = Symbol::Kind::Fn; s.name = fd.name; s.loc = fd.loc;
+    for (const auto& p : fd.params) {
+        auto t = resolve_type(*p.type, target);
+        if (!t) return false;
+        if (t->is_void()) {
+            error(p.loc, "parameter cannot have type 'void'");
+            return false;
+        }
+        s.param_types.push_back(std::move(*t));
+    }
+    auto rt = resolve_type(*fd.return_type, target);
+    if (!rt) return false;
+    s.type = std::move(*rt);
+    if (!target.declare(std::move(s))) {
+        error(fd.loc, "redeclaration of name '" + fd.name + "'");
+        return false;
+    }
+    return true;
+}
+
+bool SemanticAnalyzer::process_fn_body(const ast::FnDecl& fd, Scope& target) {
+    auto sym = target.lookup_local(fd.name);
+    if (!sym) return true;  // ошибка уже была
+    auto saved_ret = current_return_type_;
+    current_return_type_ = sym->type;
+
+    auto fn_scope = std::make_unique<Scope>(&target);
+    for (std::size_t i = 0; i < fd.params.size(); ++i) {
+        Symbol p; p.kind = Symbol::Kind::Var;
+        p.name = fd.params[i].name;
+        p.loc = fd.params[i].loc;
+        p.type = sym->param_types[i];
+        p.is_mutable = false;  // параметры иммутабельны (упрощение спеки)
+        if (!fn_scope->declare(std::move(p))) {
+            error(fd.params[i].loc,
+                  "duplicate parameter name '" + fd.params[i].name + "'");
+            current_return_type_ = saved_ret;
+            return false;
+        }
+    }
+    bool ok = check_block(*fd.body, *fn_scope);
+    current_return_type_ = saved_ret;
+    return ok;
+}
+
+bool SemanticAnalyzer::process_namespace(const ast::NamespaceDecl& nd,
+                                         Scope& target) {
+    auto ns = std::make_shared<Scope>(&target);
+    if (!process_decls(nd.members, *ns)) return false;
+    Symbol s; s.kind = Symbol::Kind::Namespace; s.name = nd.name; s.loc = nd.loc;
+    s.ns_scope = std::move(ns);
+    if (!target.declare(std::move(s))) {
+        error(nd.loc, "redeclaration of name '" + nd.name + "'");
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+std::optional<Type> SemanticAnalyzer::resolve_type(const ast::TypeExpr& te,
+                                                   Scope& scope) {
+    if (auto* nt = dynamic_cast<const ast::NamedType*>(&te)) {
+        auto sym = scope.lookup(nt->name);
+        if (!sym || sym->kind != Symbol::Kind::TypeName) {
+            error(nt->loc, "unknown type '" + nt->name + "'");
+            return std::nullopt;
+        }
+        return sym->type;
+    }
+    if (auto* at = dynamic_cast<const ast::ArrayType*>(&te)) {
+        auto elem = resolve_type(*at->element, scope);
+        if (!elem) return std::nullopt;
+        if (elem->is_void()) {
+            error(at->loc, "array element type cannot be 'void'");
+            return std::nullopt;
+        }
+        if (at->size < 0) {
+            error(at->loc, "array size cannot be negative");
+            return std::nullopt;
+        }
+        auto a = std::make_shared<ArrayTy>();
+        a->element = std::move(*elem);
+        a->size = at->size;
+        return Type(std::move(a));
+    }
+    error(te.loc, "unsupported type expression");
+    return std::nullopt;
+}
+
+// ---------------------------------------------------------------------------
+bool SemanticAnalyzer::check_block(const ast::BlockStmt& b, Scope& parent) {
+    auto scope = std::make_unique<Scope>(&parent);
+    for (const auto& s : b.stmts) {
+        if (!check_stmt(*s, *scope)) return false;
+    }
+    return true;
+}
+
+bool SemanticAnalyzer::check_stmt(const ast::Stmt& s, Scope& scope) {
+    if (auto* v = dynamic_cast<const ast::VarDeclStmt*>(&s)) return check_var_decl(*v, scope);
+    if (auto* a = dynamic_cast<const ast::AssignStmt*>(&s))  return check_assign(*a, scope);
+    if (auto* r = dynamic_cast<const ast::ReturnStmt*>(&s))  return check_return(*r, scope);
+    if (auto* i = dynamic_cast<const ast::IfStmt*>(&s))      return check_if(*i, scope);
+    if (auto* w = dynamic_cast<const ast::WhileStmt*>(&s))   return check_while(*w, scope);
+    if (dynamic_cast<const ast::BreakStmt*>(&s)) {
+        if (loop_depth_ == 0) {
+            error(s.loc, "'break' outside of loop");
+            return false;
+        }
+        return true;
+    }
+    if (dynamic_cast<const ast::ContinueStmt*>(&s)) {
+        if (loop_depth_ == 0) {
+            error(s.loc, "'continue' outside of loop");
+            return false;
+        }
+        return true;
+    }
+    if (auto* es = dynamic_cast<const ast::ExprStmt*>(&s)) {
+        return check_expr(*es->expr, scope).has_value();
+    }
+    if (dynamic_cast<const ast::EmptyStmt*>(&s)) return true;
+    if (auto* b = dynamic_cast<const ast::BlockStmt*>(&s)) return check_block(*b, scope);
+    error(s.loc, "unsupported statement");
+    return false;
+}
+
+bool SemanticAnalyzer::check_var_decl(const ast::VarDeclStmt& v, Scope& scope) {
+    Type var_type;
+    if (v.type) {
+        auto t = resolve_type(*v.type, scope);
+        if (!t) return false;
+        if (t->is_void()) {
+            error(v.loc, "variable cannot have type 'void'");
+            return false;
+        }
+        var_type = std::move(*t);
+        auto init = check_expr_ctx(*v.init, scope, var_type);
+        if (!init) return false;
+    } else {
+        // вывод типа через :=
+        auto init = check_expr(*v.init, scope);
+        if (!init) return false;
+        if (init->is_void()) {
+            error(v.loc, "cannot infer 'void' as variable type");
+            return false;
+        }
+        var_type = std::move(*init);
+    }
+    Symbol s; s.kind = Symbol::Kind::Var; s.name = v.name;
+    s.loc = v.loc; s.type = var_type; s.is_mutable = v.is_mutable;
+    if (!scope.declare(std::move(s))) {
+        error(v.loc, "redeclaration of '" + v.name + "' in this scope");
+        return false;
+    }
+    return true;
+}
+
+bool SemanticAnalyzer::check_assign(const ast::AssignStmt& a, Scope& scope) {
+    if (!is_lvalue(*a.target)) {
+        error(a.target->loc,
+              "left-hand side of assignment is not an lvalue");
+        return false;
+    }
+    // Проверка mutability — только для прямых идентификаторов в v1.
+    // (Для `s.x = ...` нужна проверка изначальной переменной — это TODO.)
+    if (auto* id = dynamic_cast<const ast::IdentExpr*>(a.target.get())) {
+        auto sym = scope.lookup(id->name);
+        if (!sym) {
+            error(id->loc, "unknown identifier '" + id->name + "'");
+            return false;
+        }
+        if (sym->kind != Symbol::Kind::Var) {
+            error(id->loc, "cannot assign to non-variable '" + id->name + "'");
+            return false;
+        }
+        if (!sym->is_mutable) {
+            error(id->loc, "cannot assign to immutable '" + id->name +
+                           "' (declared with 'let')");
+            return false;
+        }
+    }
+    auto lhs = check_expr(*a.target, scope);
+    if (!lhs) return false;
+    auto rhs = check_expr_ctx(*a.value, scope, *lhs);
+    if (!rhs) return false;
+    return true;
+}
+
+bool SemanticAnalyzer::check_return(const ast::ReturnStmt& r, Scope& scope) {
+    if (!r.value) {
+        if (!current_return_type_.is_void()) {
+            error(r.loc, "'return' without value in function returning '" +
+                         current_return_type_.to_string() + "'");
+            return false;
+        }
+        return true;
+    }
+    if (current_return_type_.is_void()) {
+        error(r.loc, "'return' with value in void function");
+        return false;
+    }
+    return check_expr_ctx(*r.value, scope, current_return_type_).has_value();
+}
+
+bool SemanticAnalyzer::check_if(const ast::IfStmt& i, Scope& scope) {
+    auto c = check_expr(*i.cond, scope);
+    if (!c) return false;
+    if (!c->is_bool()) {
+        error(i.cond->loc, "'if' condition must be 'bool', got '" +
+                           c->to_string() + "'");
+        return false;
+    }
+    if (!check_block(*i.then_branch, scope)) return false;
+    if (i.else_branch) {
+        if (!check_stmt(*i.else_branch, scope)) return false;
+    }
+    return true;
+}
+
+bool SemanticAnalyzer::check_while(const ast::WhileStmt& w, Scope& scope) {
+    auto c = check_expr(*w.cond, scope);
+    if (!c) return false;
+    if (!c->is_bool()) {
+        error(w.cond->loc, "'while' condition must be 'bool', got '" +
+                           c->to_string() + "'");
+        return false;
+    }
+    ++loop_depth_;
+    bool ok = check_block(*w.body, scope);
+    --loop_depth_;
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
+bool SemanticAnalyzer::is_lvalue(const ast::Expr& e) const {
+    return dynamic_cast<const ast::IdentExpr*>(&e) != nullptr
+        || dynamic_cast<const ast::FieldExpr*>(&e) != nullptr
+        || dynamic_cast<const ast::IndexExpr*>(&e) != nullptr;
+}
+
+// ---------------------------------------------------------------------------
+std::optional<Type> SemanticAnalyzer::check_expr(const ast::Expr& e, Scope& scope) {
+    if (dynamic_cast<const ast::IntLit*>(&e))    return Type(Primitive::I32);
+    if (dynamic_cast<const ast::FloatLit*>(&e))  return Type(Primitive::F64);
+    if (dynamic_cast<const ast::BoolLit*>(&e))   return Type(Primitive::Bool);
+    if (dynamic_cast<const ast::StringLit*>(&e)) return Type(Primitive::String);
+    if (auto* id = dynamic_cast<const ast::IdentExpr*>(&e)) {
+        auto sym = scope.lookup(id->name);
+        if (!sym) {
+            error(id->loc, "unknown identifier '" + id->name + "'");
+            return std::nullopt;
+        }
+        if (sym->kind != Symbol::Kind::Var) {
+            error(id->loc, "'" + id->name + "' is not a value");
+            return std::nullopt;
+        }
+        return sym->type;
+    }
+    if (auto* u = dynamic_cast<const ast::UnaryExpr*>(&e))     return check_unary(*u, scope);
+    if (auto* b = dynamic_cast<const ast::BinaryExpr*>(&e))    return check_binary(*b, scope);
+    if (auto* i = dynamic_cast<const ast::IndexExpr*>(&e))     return check_index(*i, scope);
+    if (auto* f = dynamic_cast<const ast::FieldExpr*>(&e))     return check_field(*f, scope);
+    if (auto* c = dynamic_cast<const ast::CallExpr*>(&e))      return check_call(*c, scope);
+    if (auto* a = dynamic_cast<const ast::ArrayLit*>(&e))      return check_array_lit(*a, scope);
+    if (auto* s = dynamic_cast<const ast::StructLit*>(&e))     return check_struct_lit(*s, scope);
+    error(e.loc, "unsupported expression");
+    return std::nullopt;
+}
+
+std::optional<Type> SemanticAnalyzer::check_expr_ctx(const ast::Expr& e,
+                                                     Scope& scope,
+                                                     const Type& ctx) {
+    // Литерал → подгоняем к контексту.
+    if (auto* il = dynamic_cast<const ast::IntLit*>(&e)) {
+        if (ctx.is_primitive() && is_int(ctx.prim())) {
+            if (int_fits(il->value, ctx.prim())) return ctx;
+            error(e.loc, std::format(
+                "integer literal {} does not fit in '{}'",
+                il->value, ctx.to_string()));
+            return std::nullopt;
+        }
+        if (ctx.is_primitive() && is_float(ctx.prim())) return ctx;
+    }
+    if (auto* un = dynamic_cast<const ast::UnaryExpr*>(&e);
+        un && un->op == ast::UnaryOp::Neg) {
+        if (auto* il = dynamic_cast<const ast::IntLit*>(un->operand.get())) {
+            if (ctx.is_primitive() && is_int(ctx.prim())) {
+                if (int_fits(-il->value, ctx.prim())) return ctx;
+                error(e.loc, std::format(
+                    "integer literal {} does not fit in '{}'",
+                    -il->value, ctx.to_string()));
+                return std::nullopt;
+            }
+        }
+    }
+    if (dynamic_cast<const ast::FloatLit*>(&e)) {
+        if (ctx.is_primitive() && is_float(ctx.prim())) return ctx;
+    }
+    // Литерал массива — каждый элемент в контексте element_type.
+    if (auto* al = dynamic_cast<const ast::ArrayLit*>(&e); al && ctx.is_array()) {
+        if (static_cast<std::int64_t>(al->elements.size()) != ctx.array().size) {
+            error(e.loc, std::format(
+                "array literal has {} elements, expected {} (type '{}')",
+                al->elements.size(), ctx.array().size, ctx.to_string()));
+            return std::nullopt;
+        }
+        for (const auto& el : al->elements) {
+            if (!check_expr_ctx(*el, scope, ctx.array().element)) return std::nullopt;
+        }
+        return ctx;
+    }
+    // Иначе — обычная проверка + конверсия.
+    auto t = check_expr(e, scope);
+    if (!t) return std::nullopt;
+    if (!can_implicit_convert(*t, ctx)) {
+        error(e.loc, std::format(
+            "cannot convert '{}' to '{}'",
+            t->to_string(), ctx.to_string()));
+        return std::nullopt;
+    }
+    return ctx;
+}
+
+std::optional<Type> SemanticAnalyzer::check_unary(const ast::UnaryExpr& u,
+                                                  Scope& scope) {
+    auto t = check_expr(*u.operand, scope);
+    if (!t) return std::nullopt;
+    if (u.op == ast::UnaryOp::Not) {
+        if (!t->is_bool()) {
+            error(u.loc, "'!' requires bool, got '" + t->to_string() + "'");
+            return std::nullopt;
+        }
+        return Type(Primitive::Bool);
+    }
+    // Neg
+    if (!t->is_primitive() || !is_numeric(t->prim())) {
+        error(u.loc, "unary '-' requires numeric type, got '" + t->to_string() + "'");
+        return std::nullopt;
+    }
+    return *t;
+}
+
+std::optional<Type> SemanticAnalyzer::check_binary(const ast::BinaryExpr& b,
+                                                   Scope& scope) {
+    auto a = check_expr(*b.lhs, scope);
+    if (!a) return std::nullopt;
+    auto c = check_expr(*b.rhs, scope);
+    if (!c) return std::nullopt;
+
+    using Op = ast::BinaryOp;
+    auto op = b.op;
+
+    if (op == Op::And || op == Op::Or) {
+        if (!a->is_bool() || !c->is_bool()) {
+            error(b.loc, std::format("'{}' requires bool operands, got '{}' and '{}'",
+                  to_string(op), a->to_string(), c->to_string()));
+            return std::nullopt;
+        }
+        return Type(Primitive::Bool);
+    }
+
+    // String == / !=
+    if ((op == Op::Eq || op == Op::NotEq) && a->is_string() && c->is_string()) {
+        return Type(Primitive::Bool);
+    }
+    // String concatenation
+    if (op == Op::Add && a->is_string() && c->is_string()) {
+        return Type(Primitive::String);
+    }
+    // Bool == / !=
+    if ((op == Op::Eq || op == Op::NotEq) && a->is_bool() && c->is_bool()) {
+        return Type(Primitive::Bool);
+    }
+
+    // Numeric ops.
+    if (!a->is_primitive() || !c->is_primitive()) {
+        error(b.loc, std::format("operator '{}' not defined for '{}' and '{}'",
+              to_string(op), a->to_string(), c->to_string()));
+        return std::nullopt;
+    }
+    auto common = common_arith(a->prim(), c->prim());
+    if (!common) {
+        error(b.loc, std::format("incompatible operand types '{}' and '{}' for '{}'",
+              a->to_string(), c->to_string(), to_string(op)));
+        return std::nullopt;
+    }
+
+    if (op == Op::Mod) {
+        if (!is_int(*common)) {
+            error(b.loc, "'%' is defined only for integer types");
+            return std::nullopt;
+        }
+    }
+    switch (op) {
+        case Op::Add: case Op::Sub: case Op::Mul:
+        case Op::Div: case Op::Mod:
+            return Type(*common);
+        case Op::Eq: case Op::NotEq:
+        case Op::Lt: case Op::Gt: case Op::LtEq: case Op::GtEq:
+            return Type(Primitive::Bool);
+        default: break;
+    }
+    error(b.loc, "internal: unhandled binary op");
+    return std::nullopt;
+}
+
+std::optional<Type> SemanticAnalyzer::check_index(const ast::IndexExpr& e,
+                                                  Scope& scope) {
+    auto base = check_expr(*e.base, scope);
+    if (!base) return std::nullopt;
+    if (!base->is_array()) {
+        error(e.loc, "indexing requires array type, got '" + base->to_string() + "'");
+        return std::nullopt;
+    }
+    auto idx = check_expr(*e.index, scope);
+    if (!idx) return std::nullopt;
+    if (!idx->is_primitive() || !is_int(idx->prim())) {
+        error(e.index->loc, "array index must be integer, got '" + idx->to_string() + "'");
+        return std::nullopt;
+    }
+    return base->array().element;
+}
+
+std::optional<Type> SemanticAnalyzer::check_field(const ast::FieldExpr& e,
+                                                  Scope& scope) {
+    // Возможен: namespace.x или struct_value.field.
+    if (auto* id = dynamic_cast<const ast::IdentExpr*>(e.base.get())) {
+        auto sym = scope.lookup(id->name);
+        if (sym && sym->kind == Symbol::Kind::Namespace) {
+            auto m = sym->ns_scope->lookup_local(e.field);
+            if (!m) {
+                error(e.loc, "namespace '" + id->name + "' has no member '" + e.field + "'");
+                return std::nullopt;
+            }
+            if (m->kind == Symbol::Kind::Var) return m->type;
+            // Tип/функция через namespace доступны через call/cast; здесь как
+            // value — error.
+            error(e.loc, "cannot use '" + id->name + "." + e.field +
+                         "' as a value here");
+            return std::nullopt;
+        }
+    }
+    auto base = check_expr(*e.base, scope);
+    if (!base) return std::nullopt;
+    if (!base->is_struct()) {
+        error(e.loc, "field access requires struct, got '" + base->to_string() + "'");
+        return std::nullopt;
+    }
+    for (const auto& [name, type] : base->strukt().fields) {
+        if (name == e.field) return type;
+    }
+    error(e.loc, "struct '" + base->strukt().name + "' has no field '" + e.field + "'");
+    return std::nullopt;
+}
+
+std::optional<Type> SemanticAnalyzer::check_call(const ast::CallExpr& e,
+                                                 Scope& scope) {
+    // print — особый builtin (полиморфный по аргументу).
+    if (auto* id = dynamic_cast<const ast::IdentExpr*>(e.callee.get());
+        id && id->name == "print") {
+        return check_builtin_print(e, scope);
+    }
+
+    // Резолвим callee: function | type | namespace-member.
+    const Symbol* callee_sym = nullptr;
+    std::string callee_name;
+    SourceLocation callee_loc;
+    if (auto* id = dynamic_cast<const ast::IdentExpr*>(e.callee.get())) {
+        callee_sym = scope.lookup(id->name);
+        callee_name = id->name;
+        callee_loc = id->loc;
+    } else if (auto* fe = dynamic_cast<const ast::FieldExpr*>(e.callee.get())) {
+        if (auto* base_id = dynamic_cast<const ast::IdentExpr*>(fe->base.get())) {
+            auto ns = scope.lookup(base_id->name);
+            if (ns && ns->kind == Symbol::Kind::Namespace) {
+                callee_sym = ns->ns_scope->lookup_local(fe->field);
+                callee_name = base_id->name + "." + fe->field;
+                callee_loc = fe->loc;
+            }
+        }
+        if (!callee_sym) {
+            error(e.loc, "callee is not a function or type");
+            return std::nullopt;
+        }
+    } else {
+        error(e.loc, "callee must be a function or type name");
+        return std::nullopt;
+    }
+
+    if (!callee_sym) {
+        error(callee_loc, "unknown identifier '" + callee_name + "'");
+        return std::nullopt;
+    }
+
+    if (callee_sym->kind == Symbol::Kind::TypeName) {
+        // cast
+        if (e.args.size() != 1) {
+            error(e.loc, std::format("cast to '{}' expects 1 argument, got {}",
+                  callee_name, e.args.size()));
+            return std::nullopt;
+        }
+        auto from = check_expr(*e.args[0], scope);
+        if (!from) return std::nullopt;
+        if (!can_explicit_cast(*from, callee_sym->type)) {
+            error(e.loc, std::format("cannot cast '{}' to '{}'",
+                  from->to_string(), callee_sym->type.to_string()));
+            return std::nullopt;
+        }
+        return callee_sym->type;
+    }
+
+    if (callee_sym->kind != Symbol::Kind::Fn) {
+        error(callee_loc, "'" + callee_name + "' is not callable");
+        return std::nullopt;
+    }
+
+    if (e.args.size() != callee_sym->param_types.size()) {
+        error(e.loc, std::format("function '{}' expects {} arguments, got {}",
+              callee_name, callee_sym->param_types.size(), e.args.size()));
+        return std::nullopt;
+    }
+    for (std::size_t i = 0; i < e.args.size(); ++i) {
+        if (!check_expr_ctx(*e.args[i], scope, callee_sym->param_types[i])) {
+            return std::nullopt;
+        }
+    }
+    return callee_sym->type;
+}
+
+std::optional<Type> SemanticAnalyzer::check_builtin_print(const ast::CallExpr& e,
+                                                          Scope& scope) {
+    if (e.args.size() != 1) {
+        error(e.loc, std::format("'print' expects 1 argument, got {}", e.args.size()));
+        return std::nullopt;
+    }
+    auto t = check_expr(*e.args[0], scope);
+    if (!t) return std::nullopt;
+    if (t->is_void() || t->is_array() || t->is_struct()) {
+        error(e.args[0]->loc, "'print' accepts only scalar types or string, got '" +
+                              t->to_string() + "'");
+        return std::nullopt;
+    }
+    return Type(Primitive::Void);
+}
+
+std::optional<Type> SemanticAnalyzer::check_array_lit(const ast::ArrayLit& al,
+                                                      Scope& scope) {
+    if (al.elements.empty()) {
+        error(al.loc, "empty array literal has no inferable type "
+                      "(use a typed declaration to specify element type)");
+        return std::nullopt;
+    }
+    auto first = check_expr(*al.elements[0], scope);
+    if (!first) return std::nullopt;
+    for (std::size_t i = 1; i < al.elements.size(); ++i) {
+        auto t = check_expr(*al.elements[i], scope);
+        if (!t) return std::nullopt;
+        if (!t->same_as(*first)) {
+            error(al.elements[i]->loc, std::format(
+                "array element {} has type '{}', expected '{}'",
+                i, t->to_string(), first->to_string()));
+            return std::nullopt;
+        }
+    }
+    auto a = std::make_shared<ArrayTy>();
+    a->element = std::move(*first);
+    a->size = static_cast<std::int64_t>(al.elements.size());
+    return Type(std::move(a));
+}
+
+std::optional<Type> SemanticAnalyzer::check_struct_lit(const ast::StructLit& sl,
+                                                       Scope& scope) {
+    auto sym = scope.lookup(sl.type_name);
+    if (!sym || sym->kind != Symbol::Kind::TypeName || !sym->type.is_struct()) {
+        error(sl.loc, "'" + sl.type_name + "' is not a struct type");
+        return std::nullopt;
+    }
+    const auto& st = sym->type.strukt();
+    if (sl.fields.size() != st.fields.size()) {
+        error(sl.loc, std::format(
+            "struct literal for '{}' has {} fields, expected {}",
+            st.name, sl.fields.size(), st.fields.size()));
+        return std::nullopt;
+    }
+    // Спека требует фиксированного порядка полей.
+    for (std::size_t i = 0; i < st.fields.size(); ++i) {
+        const auto& expected_name = st.fields[i].first;
+        const auto& expected_type = st.fields[i].second;
+        if (sl.fields[i].name != expected_name) {
+            error(sl.fields[i].loc, std::format(
+                "expected field '{}' at position {}, got '{}'",
+                expected_name, i, sl.fields[i].name));
+            return std::nullopt;
+        }
+        if (!check_expr_ctx(*sl.fields[i].value, scope, expected_type)) {
+            return std::nullopt;
+        }
+    }
+    return sym->type;
+}
+
+}  // namespace herta::semantic

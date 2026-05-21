@@ -78,6 +78,7 @@ target_sources(herta_core
             src/lexer/lexer.cppm
             src/parser/ast.cppm
             src/parser/parser.cppm
+            src/semantic/semantic.cppm
 )
 
 add_executable(myc src/main.cpp)
