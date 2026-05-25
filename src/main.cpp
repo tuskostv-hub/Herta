@@ -4,6 +4,7 @@ import herta.lexer;
 import herta.ast;
 import herta.parser;
 import herta.semantic;
+import herta.driver;
 
 namespace {
 
@@ -52,62 +53,43 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    auto src = herta::common::SourceFile::load(args->input);
-    if (!src) {
-        std::cerr << "error: " << src.error() << '\n';
-        return 1;
-    }
-
     herta::common::DiagnosticSink sink;
 
-    // --- Lex ---
-    herta::lexer::Lexer lex(*src, sink);
-    auto tokens_res = lex.tokenize();
-
-    if (args->dump_tokens && tokens_res) {
-        for (const auto& t : *tokens_res) {
-            std::cout << herta::lexer::to_string(t) << '\n';
+    // --dump-tokens / --dump-ast работают только с корневым файлом
+    // (без подгрузки импортов — для отладки).
+    if (args->dump_tokens || args->dump_ast) {
+        auto src = herta::common::SourceFile::load(args->input);
+        if (!src) {
+            std::cerr << "error: " << src.error() << '\n';
+            return 1;
         }
-        if (!args->dump_ast) {
-            if (sink.has_errors()) {
-                sink.print_all(std::cerr);
-                return 1;
+        herta::lexer::Lexer lex(*src, sink);
+        auto tokens_res = lex.tokenize();
+        if (!tokens_res) {
+            sink.print_all(std::cerr);
+            return 1;
+        }
+        if (args->dump_tokens) {
+            for (const auto& t : *tokens_res) {
+                std::cout << herta::lexer::to_string(t) << '\n';
             }
             return 0;
         }
-    }
-
-    if (!tokens_res) {
-        sink.print_all(std::cerr);
-        return 1;
-    }
-
-    // --- Parse ---
-    herta::parser::Parser parser(*tokens_res, src->name(), sink);
-    auto prog_res = parser.parse_program();
-
-    if (!prog_res) {
-        sink.print_all(std::cerr);
-        return 1;
-    }
-
-    if (args->dump_ast) {
+        herta::parser::Parser parser(*tokens_res, src->name(), sink);
+        auto prog_res = parser.parse_program();
+        if (!prog_res) {
+            sink.print_all(std::cerr);
+            return 1;
+        }
         herta::ast::dump_ast(*prog_res, std::cout);
         return 0;
     }
 
-    if (sink.has_errors()) {
+    // Полный pipeline через driver (с разрешением `import`).
+    herta::driver::Driver driver(sink);
+    if (!driver.compile(args->input) || sink.has_errors()) {
         sink.print_all(std::cerr);
         return 1;
     }
-
-    // --- Semantic ---
-    herta::semantic::SemanticAnalyzer sema(*prog_res, src->name(), sink);
-    bool sema_ok = sema.analyze();
-    if (!sema_ok || sink.has_errors()) {
-        sink.print_all(std::cerr);
-        return 1;
-    }
-
     return 0;
 }

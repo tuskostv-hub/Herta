@@ -46,7 +46,7 @@ void run(std::string_view source, bool expect_ok, std::string_view test) {
         }
         return;
     }
-    SemanticAnalyzer sema(*prog, src.name(), sink);
+    SemanticAnalyzer sema(*prog, src.name(), sink, {}, /*require_main=*/false);
     bool ok = sema.analyze();
 
     if (expect_ok && !ok) {
@@ -244,12 +244,134 @@ int main() {
     err("module m; fn f() void { panic(5); }", "panic wrong arg type");
     ok("module m; fn f() int32 { return len(\"abc\"); }", "len");
 
-    // ---------------- impl not supported ----------------
+    // ---------------- A.2.3: impl методы ----------------
+    ok(R"(
+        module m;
+        struct P { x: int32, }
+        impl P { fn get(self: P) int32 { return self.x; } }
+        fn main() int32 {
+            let p: P = P { x: 7 };
+            return p.get();
+        }
+    )", "instance method");
+    ok(R"(
+        module m;
+        struct P { x: int32, }
+        impl P { fn make() P { return P { x: 42 }; } }
+        fn main() int32 {
+            let p: P = P.make();
+            return p.x;
+        }
+    )", "static method (no self)");
+    ok(R"(
+        module m;
+        struct P { x: int32, }
+        impl P { fn add(self: P, n: int32) int32 { return self.x + n; } }
+        fn main() int32 {
+            let p: P = P { x: 1 };
+            return p.add(2);
+        }
+    )", "instance method with arg");
     err(R"(
         module m;
         struct P { x: int32, }
         impl P { fn f(self: P) int32 { return self.x; } }
-    )", "impl not implemented");
+        fn main() int32 {
+            let p: P = P { x: 1 };
+            return p.nope();
+        }
+    )", "no such method");
+    err(R"(
+        module m;
+        struct P { x: int32, }
+        impl P { fn f(self: P) int32 { return self.x; } fn f(self: P) int32 { return 0; } }
+    )", "duplicate method");
+    err(R"(
+        module m;
+        struct A { x: int32, }
+        struct B { x: int32, }
+        impl A { fn f(self: B) int32 { return 0; } }
+    )", "self type mismatch");
+
+    // ---------------- v1.0: char ----------------
+    ok("module m; fn f() char { return 'a'; }", "char literal");
+    ok("module m; fn f() char { return '\\n'; }", "char escape");
+    ok("module m; fn f() bool { return 'a' == 'b'; }", "char eq");
+    ok("module m; fn f() bool { return 'a' != 'b'; }", "char neq");
+    err("module m; fn f() bool { return 'a' < 'b'; }", "char no <");
+    err("module m; fn f() char { return 'a' + 'b'; }", "char no +");
+    ok("module m; fn f() int32 { return int32('A'); }",  "cast char→int");
+    ok("module m; fn f() char  { return char(65); }",     "cast int→char");
+    err("module m; fn f() string { return string('a'); }", "cast char→string error");
+    ok("module m; fn f() void { print('a'); }", "print char");
+
+    // ---------------- v1.0: binary literals ----------------
+    ok("module m; fn f() int32 { return 0b101010; }",  "binary literal");
+    ok("module m; fn f() uint8 { return 0b11111111; }", "binary fits uint8");
+    err("module m; fn f() int32 { return 0b; }", "empty binary literal");
+
+    // ---------------- v1.0: assert ----------------
+    ok("module m; fn f() void { assert(true); }",  "assert bool");
+    ok("module m; fn f() void { assert(1 == 1); }", "assert comparison");
+    err("module m; fn f() void { assert(1); }",     "assert non-bool");
+    err("module m; fn f() void { assert(); }",      "assert no args");
+
+    // ---------------- v1.0: len for arrays ----------------
+    ok(R"(
+        module m;
+        fn f() int32 {
+            var a: [int32; 5] = [1, 2, 3, 4, 5];
+            return len(a);
+        }
+    )", "len of array");
+    ok("module m; fn f() int32 { return len(\"hello\"); }", "len of string");
+    err("module m; fn f() int32 { return len(42); }", "len of int error");
+
+    // ---------------- v1.0: array equality ----------------
+    ok(R"(
+        module m;
+        fn f() bool {
+            var a: [int32; 3] = [1, 2, 3];
+            var b: [int32; 3] = [1, 2, 3];
+            return a == b;
+        }
+    )", "array == same size");
+    err(R"(
+        module m;
+        fn f() bool {
+            var a: [int32; 3] = [1, 2, 3];
+            var b: [int32; 5] = [1, 2, 3, 4, 5];
+            return a == b;
+        }
+    )", "array == different sizes");
+
+    // ---------------- v1.0: chained lvalue mutability ----------------
+    ok(R"(
+        module m;
+        struct P { x: int32, }
+        fn f() int32 {
+            var p: P = P { x: 1 };
+            p.x = 5;
+            return p.x;
+        }
+    )", "var struct field mutable");
+    err(R"(
+        module m;
+        struct P { x: int32, }
+        fn f() int32 {
+            let p: P = P { x: 1 };
+            p.x = 5;
+            return p.x;
+        }
+    )", "let struct field immutable (chain)");
+    err(R"(
+        module m;
+        fn f() int32 {
+            let a: [int32; 3] = [1, 2, 3];
+            a[0] = 5;
+            return a[0];
+        }
+    )", "let array element immutable (chain)");
 
     // ---------------- bubble_sort через namespace + arrays ----------------
     ok(R"(

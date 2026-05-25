@@ -154,6 +154,16 @@ export struct StringLit : Expr {
     }
 };
 
+export struct CharLit : Expr {
+    std::uint32_t value = 0;  // Unicode code point (8-битный ASCII укладывается)
+    std::string lexeme;
+
+    void dump(std::ostream& os, int level) const override {
+        indent(os, level);
+        os << "CharLit " << lexeme << '\n';
+    }
+};
+
 export struct IdentExpr : Expr {
     std::string name;
 

@@ -90,6 +90,8 @@ private:
                                              SourceLocation loc);
     std::optional<std::string> parse_string_lexeme(std::string_view lex,
                                                    SourceLocation loc);
+    std::optional<std::uint32_t> parse_char_lexeme(std::string_view lex,
+                                                   SourceLocation loc);
 
     // --- state ---
     std::span<const Token> tokens_;
@@ -158,6 +160,9 @@ std::optional<std::int64_t> Parser::parse_int_lexeme(std::string_view lex,
     if (lex.size() >= 2 && lex[0] == '0' && (lex[1] == 'x' || lex[1] == 'X')) {
         base = 16;
         lex.remove_prefix(2);
+    } else if (lex.size() >= 2 && lex[0] == '0' && (lex[1] == 'b' || lex[1] == 'B')) {
+        base = 2;
+        lex.remove_prefix(2);
     }
     std::int64_t value = 0;
     auto [ptr, ec] = std::from_chars(lex.data(), lex.data() + lex.size(),
@@ -181,6 +186,71 @@ std::optional<double> Parser::parse_float_lexeme(std::string_view lex,
         return std::nullopt;
     }
     return value;
+}
+
+// `lex` — целиком, включая одинарные кавычки.
+std::optional<std::uint32_t> Parser::parse_char_lexeme(std::string_view lex,
+                                                       SourceLocation loc) {
+    if (lex.size() < 3 || lex.front() != '\'' || lex.back() != '\'') {
+        error_at(Token{TokenKind::Invalid, lex, loc}, "malformed char literal");
+        return std::nullopt;
+    }
+    auto inner = lex.substr(1, lex.size() - 2);
+    if (inner.empty()) {
+        error_at(Token{TokenKind::Invalid, lex, loc}, "empty char literal");
+        return std::nullopt;
+    }
+    if (inner[0] == '\\') {
+        if (inner.size() != 2) {
+            error_at(Token{TokenKind::Invalid, lex, loc}, "malformed char escape");
+            return std::nullopt;
+        }
+        switch (inner[1]) {
+            case '\'': return static_cast<std::uint32_t>('\'');
+            case '\\': return static_cast<std::uint32_t>('\\');
+            case 'n':  return static_cast<std::uint32_t>('\n');
+            case 't':  return static_cast<std::uint32_t>('\t');
+            case 'r':  return static_cast<std::uint32_t>('\r');
+            case '0':  return 0u;
+            default:
+                error_at(Token{TokenKind::Invalid, lex, loc},
+                         std::format("invalid char escape: \\{}", inner[1]));
+                return std::nullopt;
+        }
+    }
+    // UTF-8 декодирование (A.1.2): один codepoint из 1-4 байт.
+    auto b0 = static_cast<unsigned char>(inner[0]);
+    int n;
+    std::uint32_t cp;
+    if (b0 < 0x80) {
+        if (inner.size() != 1) {
+            error_at(Token{TokenKind::Invalid, lex, loc}, "malformed char literal");
+            return std::nullopt;
+        }
+        return static_cast<std::uint32_t>(b0);
+    }
+    if ((b0 & 0xE0) == 0xC0)      { n = 2; cp = b0 & 0x1Fu; }
+    else if ((b0 & 0xF0) == 0xE0) { n = 3; cp = b0 & 0x0Fu; }
+    else if ((b0 & 0xF8) == 0xF0) { n = 4; cp = b0 & 0x07u; }
+    else {
+        error_at(Token{TokenKind::Invalid, lex, loc}, "invalid UTF-8 in char literal");
+        return std::nullopt;
+    }
+    if (inner.size() != static_cast<std::size_t>(n)) {
+        error_at(Token{TokenKind::Invalid, lex, loc},
+                 "char literal: expected UTF-8 of length matching lead byte");
+        return std::nullopt;
+    }
+    for (int i = 1; i < n; ++i) {
+        auto b = static_cast<unsigned char>(inner[i]);
+        if ((b & 0xC0) != 0x80) {
+            error_at(Token{TokenKind::Invalid, lex, loc},
+                     "invalid UTF-8 continuation byte in char literal");
+            return std::nullopt;
+        }
+        cp = (cp << 6) | (b & 0x3Fu);
+    }
+    return cp;
 }
 
 // `lex` приходит ВКЛЮЧАЯ кавычки.
@@ -1019,6 +1089,17 @@ std::unique_ptr<ast::Expr> Parser::parse_primary_expr() {
             auto n = std::make_unique<ast::StringLit>();
             n->loc = loc;
             n->value = std::move(*v);
+            n->lexeme = std::move(lex);
+            return n;
+        }
+        case TokenKind::CharLiteral: {
+            auto lex = std::string(current().lexeme);
+            advance();
+            auto v = parse_char_lexeme(lex, loc);
+            if (!v) return nullptr;
+            auto n = std::make_unique<ast::CharLit>();
+            n->loc = loc;
+            n->value = *v;
             n->lexeme = std::move(lex);
             return n;
         }

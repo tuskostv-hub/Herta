@@ -25,7 +25,7 @@ whitespace    = " " | "\t" | "\r" | "\n" ;
 fn        let       var       return    if        else
 while     break     continue  struct    type      namespace
 impl      module    import    pub       true      false
-print     input     exit      panic
+print     input     exit      panic     assert    len
 ```
 
 > `self` **не** является ключевым словом — это обычный идентификатор, используемый по соглашению как имя первого параметра инстанс-метода (см. §3.2.5).
@@ -43,12 +43,13 @@ identifier    = letter { letter | digit } ;
 #### Целые числа
 
 ```
-int_literal   = decimal_lit | hex_lit ;
+int_literal   = decimal_lit | hex_lit | bin_lit ;
 decimal_lit   = digit { digit } ;
 hex_lit       = "0x" hex_digit { hex_digit } ;
+bin_lit       = "0b" ( "0" | "1" ) { "0" | "1" } ;
 ```
 
-Примеры: `0`, `42`, `1000`, `0xFF`
+Примеры: `0`, `42`, `1000`, `0xFF`, `0b101010`
 
 #### Вещественные числа
 
@@ -75,6 +76,16 @@ escape_seq     = "\\" ( '"' | "\\" | "n" | "t" | "r" ) ;
 ```
 
 Примеры: `"hello"`, `"line\n"`, `"tab\there"`
+
+#### Символы (char)
+
+```
+char_literal   = "'" ( single_char | char_escape ) "'" ;
+single_char    = any_byte_except_quote_and_backslash_and_newline ;
+char_escape    = "\\" ( "'" | "\\" | "n" | "t" | "r" | "0" ) ;
+```
+
+Примеры: `'a'`, `'\n'`, `'\''`, `'\0'`
 
 #### Литерал массива
 

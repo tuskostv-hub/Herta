@@ -21,6 +21,7 @@ export enum class TokenKind : std::uint8_t {
     IntLiteral,
     FloatLiteral,
     StringLiteral,
+    CharLiteral,
     Identifier,
 
     // Ключевые слова (18 шт — см. grammar.md §2.1)
@@ -112,6 +113,8 @@ private:
                       std::size_t start_pos);
     Token scan_string(herta::common::SourceLocation start,
                       std::size_t start_pos);
+    Token scan_char(herta::common::SourceLocation start,
+                    std::size_t start_pos);
     Token scan_punct_or_op(herta::common::SourceLocation start,
                            std::size_t start_pos);
 
@@ -187,6 +190,7 @@ std::string_view to_string(TokenKind k) noexcept {
         case TokenKind::IntLiteral: return "IntLiteral";
         case TokenKind::FloatLiteral: return "FloatLiteral";
         case TokenKind::StringLiteral: return "StringLiteral";
+        case TokenKind::CharLiteral: return "CharLiteral";
         case TokenKind::Identifier: return "Identifier";
         case TokenKind::KwFn: return "KwFn";
         case TokenKind::KwLet: return "KwLet";
@@ -345,6 +349,17 @@ Token Lexer::scan_number(herta::common::SourceLocation start,
         while (!at_end() && is_hex_digit(peek())) advance();
         return make_token(TokenKind::IntLiteral, start_pos, start);
     }
+    // Двоичный литерал: "0b" [01]+
+    if (peek() == '0' && (peek(1) == 'b' || peek(1) == 'B')) {
+        advance();  // '0'
+        advance();  // 'b' / 'B'
+        if (peek() != '0' && peek() != '1') {
+            error("invalid binary literal: at least one binary digit required", start);
+            return Token{TokenKind::Invalid, {}, start};
+        }
+        while (peek() == '0' || peek() == '1') advance();
+        return make_token(TokenKind::IntLiteral, start_pos, start);
+    }
 
     // Десятичная целая часть.
     while (!at_end() && is_digit(peek())) advance();
@@ -408,6 +423,64 @@ Token Lexer::scan_string(herta::common::SourceLocation start,
             advance();
         }
     }
+}
+
+Token Lexer::scan_char(herta::common::SourceLocation start, std::size_t start_pos) {
+    advance();  // открывающая '
+    if (at_end() || peek() == '\n') {
+        error("unterminated char literal", start);
+        return Token{TokenKind::Invalid, {}, start};
+    }
+    if (peek() == '\'') {
+        error("empty char literal", start);
+        return Token{TokenKind::Invalid, {}, start};
+    }
+    if (peek() == '\\') {
+        auto esc_loc = current_loc();
+        advance();  // '\\'
+        if (at_end()) {
+            error("unterminated char literal", start);
+            return Token{TokenKind::Invalid, {}, start};
+        }
+        char e = peek();
+        if (e == '\'' || e == '\\' || e == 'n' || e == 't' || e == 'r' || e == '0') {
+            advance();
+        } else {
+            error(std::string("invalid escape sequence in char literal: \\") + e, esc_loc);
+            return Token{TokenKind::Invalid, {}, start};
+        }
+    } else {
+        // UTF-8: первый байт определяет длину последовательности.
+        auto first = static_cast<unsigned char>(peek());
+        int total;
+        if (first < 0x80)            total = 1;  // ASCII
+        else if ((first & 0xE0) == 0xC0) total = 2;
+        else if ((first & 0xF0) == 0xE0) total = 3;
+        else if ((first & 0xF8) == 0xF0) total = 4;
+        else {
+            error("invalid UTF-8 lead byte in char literal", start);
+            return Token{TokenKind::Invalid, {}, start};
+        }
+        advance();  // первый байт
+        for (int i = 1; i < total; ++i) {
+            if (at_end()) {
+                error("unterminated UTF-8 sequence in char literal", start);
+                return Token{TokenKind::Invalid, {}, start};
+            }
+            auto b = static_cast<unsigned char>(peek());
+            if ((b & 0xC0) != 0x80) {
+                error("invalid UTF-8 continuation byte in char literal", start);
+                return Token{TokenKind::Invalid, {}, start};
+            }
+            advance();
+        }
+    }
+    if (peek() != '\'') {
+        error("char literal must contain exactly one character", start);
+        return Token{TokenKind::Invalid, {}, start};
+    }
+    advance();  // закрывающая '
+    return make_token(TokenKind::CharLiteral, start_pos, start);
 }
 
 Token Lexer::scan_punct_or_op(herta::common::SourceLocation start,
@@ -484,6 +557,8 @@ std::expected<std::vector<Token>, std::monostate> Lexer::tokenize() {
             t = scan_number(start, start_pos);
         } else if (c == '"') {
             t = scan_string(start, start_pos);
+        } else if (c == '\'') {
+            t = scan_char(start, start_pos);
         } else {
             t = scan_punct_or_op(start, start_pos);
         }

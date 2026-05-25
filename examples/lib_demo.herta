@@ -1,0 +1,19 @@
+// Демонстрация использования библиотечного модуля MathLib.
+// Запускать: ./build/myc examples/lib_demo.herta
+
+module lib_demo;
+import MathLib;
+
+fn main() int32 {
+    let a: int32 = MathLib.abs(-7);          // 7
+    let b: int32 = MathLib.max(a, 10);       // 10
+    let c: int32 = MathLib.clamp(42, 0, 20); // 20
+    let d: int32 = MathLib.pow(2, 8);        // 256
+
+    assert(a == 7);
+    assert(b == 10);
+    assert(c == 20);
+    assert(d == 256);
+
+    return 0;
+}
