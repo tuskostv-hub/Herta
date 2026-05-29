@@ -292,6 +292,25 @@ int main() {
         struct B { x: int32, }
         impl A { fn f(self: B) int32 { return 0; } }
     )", "self type mismatch");
+    // Regression: для одного типа допустимы несколько impl-блоков; тела
+    // методов должны типизироваться против СВОИХ сигнатур, а не сигнатур
+    // методов из соседних impl-блоков.
+    ok(R"(
+        module m;
+        struct P { x: int32, }
+        impl P { fn a(self: P) int32 { return self.x; } }
+        impl P { fn b(self: P, n: int32) int32 { return self.x + n; } }
+        fn main() int32 {
+            let p: P = P { x: 7 };
+            return p.a() + p.b(3);
+        }
+    )", "multiple impl blocks for same type");
+    err(R"(
+        module m;
+        struct P { x: int32, }
+        impl P { fn a(self: P) int32 { return self.x; } }
+        impl P { fn a(self: P) int32 { return 0; } }
+    )", "duplicate method across impl blocks");
 
     // ---------------- v1.0: char ----------------
     ok("module m; fn f() char { return 'a'; }", "char literal");

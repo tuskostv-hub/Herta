@@ -4,6 +4,7 @@ import herta.lexer;
 import herta.ast;
 import herta.parser;
 import herta.semantic;
+import herta.ir;
 import herta.driver;
 
 namespace {
@@ -13,10 +14,12 @@ struct CliArgs {
     std::string output;
     bool dump_tokens = false;
     bool dump_ast = false;
+    bool dump_ir = false;
+    bool no_opt = false;
 };
 
 void print_usage(std::ostream& os) {
-    os << "usage: myc <source.herta> [-o <output>] [--dump-tokens] [--dump-ast]\n";
+    os << "usage: myc <source.herta> [-o <output>] [--dump-tokens] [--dump-ast] [--dump-ir] [--no-opt]\n";
 }
 
 std::expected<CliArgs, std::string> parse_args(int argc, char** argv) {
@@ -27,6 +30,10 @@ std::expected<CliArgs, std::string> parse_args(int argc, char** argv) {
             a.dump_tokens = true;
         } else if (s == "--dump-ast") {
             a.dump_ast = true;
+        } else if (s == "--dump-ir") {
+            a.dump_ir = true;
+        } else if (s == "--no-opt") {
+            a.no_opt = true;
         } else if (s == "-o") {
             if (i + 1 >= argc) return std::unexpected("missing value for -o");
             a.output = argv[++i];
@@ -87,9 +94,13 @@ int main(int argc, char** argv) {
 
     // Полный pipeline через driver (с разрешением `import`).
     herta::driver::Driver driver(sink);
+    driver.set_optimize(!args->no_opt);
     if (!driver.compile(args->input) || sink.has_errors()) {
         sink.print_all(std::cerr);
         return 1;
+    }
+    if (args->dump_ir) {
+        driver.dump_ir(std::cout);
     }
     return 0;
 }

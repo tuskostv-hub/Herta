@@ -35,6 +35,8 @@ cmake --build build
 ./build/myc <source.herta>                # компиляция
 ./build/myc <source.herta> --dump-tokens  # вывести поток токенов
 ./build/myc <source.herta> --dump-ast     # вывести AST (на этапе парсера)
+./build/myc <source.herta> --dump-ir      # вывести трёхадресный IR (после оптимизаций)
+./build/myc <source.herta> --dump-ir --no-opt   # ... без constant folding / DCE
 ./build/myc <source.herta> -o <output>    # указать имя выходного файла
 ```
 

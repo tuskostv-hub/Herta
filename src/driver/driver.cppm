@@ -14,6 +14,7 @@ import herta.lexer;
 import herta.ast;
 import herta.parser;
 import herta.semantic;
+import herta.ir;
 
 namespace herta::driver {
 
@@ -27,6 +28,7 @@ struct LoadedModule {
     std::shared_ptr<SourceFile> source;       // лексеру/парсеру нужно время жизни
     std::vector<herta::lexer::Token> tokens;  // string_view'ы смотрят в source
     std::unique_ptr<ast::Program> program;
+    std::unique_ptr<herta::semantic::SemanticAnalyzer> sema;  // живёт до конца Driver'а
 };
 
 export class Driver {
@@ -37,10 +39,19 @@ public:
     // в порядке зависимостей. Возвращает true при успехе.
     bool compile(const std::filesystem::path& root_file);
 
+    // Управление оптимизациями (B.2.2 — constant folding + DCE).
+    // По умолчанию включены; CLI флаг --no-opt → set_optimize(false).
+    void set_optimize(bool on) noexcept { optimize_ = on; }
+
+    // Выводит IR для всех скомпилированных модулей в топологическом порядке.
+    // Вызывать только после успешного compile().
+    void dump_ir(std::ostream& os) const;
+
 private:
     bool load_recursive(const std::filesystem::path& path);
 
     DiagnosticSink& sink_;
+    bool optimize_ = true;
     std::filesystem::path search_dir_;
     // Топологический порядок: модули, которые ни от кого не зависят, идут первыми.
     std::vector<std::unique_ptr<LoadedModule>> modules_;
@@ -80,14 +91,25 @@ bool Driver::compile(const std::filesystem::path& root_file) {
 
         // require_main только для корневого модуля (последний в порядке).
         bool is_root = (i + 1 == modules_.size());
-        herta::semantic::SemanticAnalyzer sema(
+        auto sema = std::make_unique<herta::semantic::SemanticAnalyzer>(
             *mod.program, mod.path.string(), sink_,
             std::move(imports), /*require_main=*/is_root);
 
-        if (!sema.analyze()) return false;
-        exports[mod.name] = sema.module_scope();
+        if (!sema->analyze()) return false;
+        exports[mod.name] = sema->module_scope();
+        modules_[i]->sema = std::move(sema);
     }
     return true;
+}
+
+void Driver::dump_ir(std::ostream& os) const {
+    for (const auto& mod : modules_) {
+        if (!mod->sema) continue;
+        herta::ir::Lowerer lower(*mod->program, *mod->sema);
+        auto ir_mod = lower.lower();
+        if (optimize_) herta::ir::optimize_module(ir_mod);
+        herta::ir::dump_module(ir_mod, os);
+    }
 }
 
 bool Driver::load_recursive(const std::filesystem::path& path) {

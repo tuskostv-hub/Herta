@@ -13,3 +13,7 @@ add_test(NAME semantic.check COMMAND test_semantic)
 add_executable(test_modules driver/test_modules.cpp)
 target_link_libraries(test_modules PRIVATE herta_core)
 add_test(NAME driver.modules COMMAND test_modules)
+
+add_executable(test_ir ir/test_ir.cpp)
+target_link_libraries(test_ir PRIVATE herta_core)
+add_test(NAME ir.lowering COMMAND test_ir)

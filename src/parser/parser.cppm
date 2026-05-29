@@ -241,7 +241,7 @@ std::optional<std::uint32_t> Parser::parse_char_lexeme(std::string_view lex,
                  "char literal: expected UTF-8 of length matching lead byte");
         return std::nullopt;
     }
-    for (int i = 1; i < n; ++i) {
+    for (std::size_t i = 1; i < static_cast<std::size_t>(n); ++i) {
         auto b = static_cast<unsigned char>(inner[i]);
         if ((b & 0xC0) != 0x80) {
             error_at(Token{TokenKind::Invalid, lex, loc},

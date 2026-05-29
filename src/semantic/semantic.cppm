@@ -28,8 +28,8 @@ export enum class Primitive : std::uint8_t {
     Bool, String, Char, Void,
 };
 
-struct ArrayTy;
-struct StructTy;
+export struct ArrayTy;
+export struct StructTy;
 
 export class Type {
 public:
@@ -246,7 +246,7 @@ export struct Symbol {
 
 // Метод impl-блока: хранится в side-table SemanticAnalyzer::methods_,
 // привязанной к идентичности StructTy (shared_ptr).
-struct MethodInfo {
+export struct MethodInfo {
     std::string name;
     std::vector<Type> param_types;
     std::vector<std::string> param_names;
@@ -307,6 +307,25 @@ public:
     // потребителей через import; запрос помечен pub-фильтрацией при доступе).
     std::shared_ptr<Scope> module_scope() const { return shared_scope_; }
 
+    // Side-table: тип каждого выражения после проверки. Заполняется в
+    // check_expr / check_expr_ctx. Используется фазой lowering (IR), чтобы
+    // не повторять разрешение типов.
+    const std::unordered_map<const ast::Expr*, Type>& expression_types() const noexcept {
+        return expr_types_;
+    }
+
+    // Методы impl-блоков: ключ — указатель на StructTy (т.е. идентичность типа).
+    // Используется lowering для разрешения `obj.method(...)` и `T.method(...)`.
+    const std::unordered_map<StructTy*, std::vector<MethodInfo>>& methods() const noexcept {
+        return methods_;
+    }
+
+    // Карта импортированных модулей: имя → их публичный scope.
+    // Используется lowering для эмиссии cross-module вызовов как `M.fn`.
+    const std::unordered_map<std::string, std::shared_ptr<Scope>>& imports() const noexcept {
+        return imports_;
+    }
+
 private:
     // --- top-level ---
     bool process_decls(const std::vector<std::unique_ptr<ast::Decl>>& decls,
@@ -366,6 +385,13 @@ private:
     std::unordered_map<std::string, std::shared_ptr<Scope>> imports_;
     // impl-методы: ключ — указатель на StructTy (нестираемая идентичность).
     std::unordered_map<StructTy*, std::vector<MethodInfo>> methods_;
+    // Side-table: тип каждой проверенной AST-Expr (см. expression_types()).
+    std::unordered_map<const ast::Expr*, Type> expr_types_;
+    // Где начинаются методы каждого impl-блока внутри methods_[StructTy*].
+    // Нужно потому, что для одного типа допустимо несколько impl-блоков, и
+    // process_impl_bodies должен сопоставить fn.body ↔ MethodInfo по индексу
+    // внутри своего блока (а не глобально по methods_).
+    std::unordered_map<const ast::ImplDecl*, std::size_t> impl_method_offset_;
 };
 
 // ---------------------------------------------------------------------------
@@ -613,6 +639,7 @@ bool SemanticAnalyzer::process_impl_signatures(const ast::ImplDecl& im,
         return false;
     }
     auto* st_ptr = sym->type.struct_ptr().get();
+    impl_method_offset_[&im] = methods_[st_ptr].size();
 
     for (const auto& fn : im.methods) {
         MethodInfo info;
@@ -666,10 +693,12 @@ bool SemanticAnalyzer::process_impl_bodies(const ast::ImplDecl& im,
     if (!sym) return true;
     auto* st_ptr = sym->type.struct_ptr().get();
     const auto& infos = methods_[st_ptr];
+    auto off_it = impl_method_offset_.find(&im);
+    std::size_t base = (off_it != impl_method_offset_.end()) ? off_it->second : 0;
 
     for (std::size_t k = 0; k < im.methods.size(); ++k) {
         const auto& fn = *im.methods[k];
-        const auto& info = infos[k];
+        const auto& info = infos[base + k];
         auto saved_ret = current_return_type_;
         current_return_type_ = info.return_type;
 
@@ -892,11 +921,15 @@ bool SemanticAnalyzer::is_lvalue(const ast::Expr& e) const {
 
 // ---------------------------------------------------------------------------
 std::optional<Type> SemanticAnalyzer::check_expr(const ast::Expr& e, Scope& scope) {
-    if (dynamic_cast<const ast::IntLit*>(&e))    return Type(Primitive::I32);
-    if (dynamic_cast<const ast::FloatLit*>(&e))  return Type(Primitive::F64);
-    if (dynamic_cast<const ast::BoolLit*>(&e))   return Type(Primitive::Bool);
-    if (dynamic_cast<const ast::StringLit*>(&e)) return Type(Primitive::String);
-    if (dynamic_cast<const ast::CharLit*>(&e))   return Type(Primitive::Char);
+    auto record = [&](std::optional<Type> t) -> std::optional<Type> {
+        if (t) expr_types_[&e] = *t;
+        return t;
+    };
+    if (dynamic_cast<const ast::IntLit*>(&e))    return record(Type(Primitive::I32));
+    if (dynamic_cast<const ast::FloatLit*>(&e))  return record(Type(Primitive::F64));
+    if (dynamic_cast<const ast::BoolLit*>(&e))   return record(Type(Primitive::Bool));
+    if (dynamic_cast<const ast::StringLit*>(&e)) return record(Type(Primitive::String));
+    if (dynamic_cast<const ast::CharLit*>(&e))   return record(Type(Primitive::Char));
     if (auto* id = dynamic_cast<const ast::IdentExpr*>(&e)) {
         auto sym = scope.lookup(id->name);
         if (!sym) {
@@ -907,15 +940,15 @@ std::optional<Type> SemanticAnalyzer::check_expr(const ast::Expr& e, Scope& scop
             error(id->loc, "'" + id->name + "' is not a value");
             return std::nullopt;
         }
-        return sym->type;
+        return record(sym->type);
     }
-    if (auto* u = dynamic_cast<const ast::UnaryExpr*>(&e))     return check_unary(*u, scope);
-    if (auto* b = dynamic_cast<const ast::BinaryExpr*>(&e))    return check_binary(*b, scope);
-    if (auto* i = dynamic_cast<const ast::IndexExpr*>(&e))     return check_index(*i, scope);
-    if (auto* f = dynamic_cast<const ast::FieldExpr*>(&e))     return check_field(*f, scope);
-    if (auto* c = dynamic_cast<const ast::CallExpr*>(&e))      return check_call(*c, scope);
-    if (auto* a = dynamic_cast<const ast::ArrayLit*>(&e))      return check_array_lit(*a, scope);
-    if (auto* s = dynamic_cast<const ast::StructLit*>(&e))     return check_struct_lit(*s, scope);
+    if (auto* u = dynamic_cast<const ast::UnaryExpr*>(&e))     return record(check_unary(*u, scope));
+    if (auto* b = dynamic_cast<const ast::BinaryExpr*>(&e))    return record(check_binary(*b, scope));
+    if (auto* i = dynamic_cast<const ast::IndexExpr*>(&e))     return record(check_index(*i, scope));
+    if (auto* f = dynamic_cast<const ast::FieldExpr*>(&e))     return record(check_field(*f, scope));
+    if (auto* c = dynamic_cast<const ast::CallExpr*>(&e))      return record(check_call(*c, scope));
+    if (auto* a = dynamic_cast<const ast::ArrayLit*>(&e))      return record(check_array_lit(*a, scope));
+    if (auto* s = dynamic_cast<const ast::StructLit*>(&e))     return record(check_struct_lit(*s, scope));
     error(e.loc, "unsupported expression");
     return std::nullopt;
 }
@@ -923,22 +956,29 @@ std::optional<Type> SemanticAnalyzer::check_expr(const ast::Expr& e, Scope& scop
 std::optional<Type> SemanticAnalyzer::check_expr_ctx(const ast::Expr& e,
                                                      Scope& scope,
                                                      const Type& ctx) {
+    auto record = [&](Type t) -> std::optional<Type> {
+        expr_types_[&e] = t;
+        return t;
+    };
     // Литерал → подгоняем к контексту.
     if (auto* il = dynamic_cast<const ast::IntLit*>(&e)) {
         if (ctx.is_primitive() && is_int(ctx.prim())) {
-            if (int_fits(il->value, ctx.prim())) return ctx;
+            if (int_fits(il->value, ctx.prim())) return record(ctx);
             error(e.loc, std::format(
                 "integer literal {} does not fit in '{}'",
                 il->value, ctx.to_string()));
             return std::nullopt;
         }
-        if (ctx.is_primitive() && is_float(ctx.prim())) return ctx;
+        if (ctx.is_primitive() && is_float(ctx.prim())) return record(ctx);
     }
     if (auto* un = dynamic_cast<const ast::UnaryExpr*>(&e);
         un && un->op == ast::UnaryOp::Neg) {
         if (auto* il = dynamic_cast<const ast::IntLit*>(un->operand.get())) {
             if (ctx.is_primitive() && is_int(ctx.prim())) {
-                if (int_fits(-il->value, ctx.prim())) return ctx;
+                if (int_fits(-il->value, ctx.prim())) {
+                    expr_types_[un->operand.get()] = ctx;  // вложенный IntLit
+                    return record(ctx);
+                }
                 error(e.loc, std::format(
                     "integer literal {} does not fit in '{}'",
                     -il->value, ctx.to_string()));
@@ -947,7 +987,7 @@ std::optional<Type> SemanticAnalyzer::check_expr_ctx(const ast::Expr& e,
         }
     }
     if (dynamic_cast<const ast::FloatLit*>(&e)) {
-        if (ctx.is_primitive() && is_float(ctx.prim())) return ctx;
+        if (ctx.is_primitive() && is_float(ctx.prim())) return record(ctx);
     }
     // Литерал массива — каждый элемент в контексте element_type.
     if (auto* al = dynamic_cast<const ast::ArrayLit*>(&e); al && ctx.is_array()) {
@@ -960,7 +1000,7 @@ std::optional<Type> SemanticAnalyzer::check_expr_ctx(const ast::Expr& e,
         for (const auto& el : al->elements) {
             if (!check_expr_ctx(*el, scope, ctx.array().element)) return std::nullopt;
         }
-        return ctx;
+        return record(ctx);
     }
     // Иначе — обычная проверка + конверсия.
     auto t = check_expr(e, scope);
@@ -971,7 +1011,7 @@ std::optional<Type> SemanticAnalyzer::check_expr_ctx(const ast::Expr& e,
             t->to_string(), ctx.to_string()));
         return std::nullopt;
     }
-    return ctx;
+    return record(ctx);
 }
 
 std::optional<Type> SemanticAnalyzer::check_unary(const ast::UnaryExpr& u,
