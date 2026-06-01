@@ -17,3 +17,10 @@ add_test(NAME driver.modules COMMAND test_modules)
 add_executable(test_ir ir/test_ir.cpp)
 target_link_libraries(test_ir PRIVATE herta_core)
 add_test(NAME ir.lowering COMMAND test_ir)
+
+# Интеграционный тест исполнителя: запускает бинарь myc на подпроцессах.
+add_executable(test_interp interp/test_interp.cpp)
+target_link_libraries(test_interp PRIVATE herta_core)
+target_compile_definitions(test_interp PRIVATE MYC_PATH="$<TARGET_FILE:myc>")
+add_dependencies(test_interp myc)
+add_test(NAME interp.run COMMAND test_interp)

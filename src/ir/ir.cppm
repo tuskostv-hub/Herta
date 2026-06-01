@@ -155,9 +155,20 @@ export struct Function {
     SourceLocation loc;
 };
 
+// Описание struct-типа: имя + упорядоченный список полей (имя, тип-строка).
+// Нужен для бэкендов, которым требуется позиционная раскладка (LLVM).
+export struct StructDef {
+    std::string name;
+    std::vector<std::pair<std::string, std::string>> fields;  // имя → строка-тип
+};
+
 export struct Module {
     std::string name;
     std::vector<Function> functions;
+    std::vector<StructDef> structs;
+    // Псевдонимы типов (`type Name = Target;`): кодген должен раскрывать их
+    // до примитива/массива/структуры. Хранятся плоско; для v1 этого хватает.
+    std::vector<std::pair<std::string, std::string>> type_aliases;
 };
 
 // ===========================================================================
@@ -338,6 +349,9 @@ public:
 
     Module lower();
 
+    // Доступ к ещё-не-возвращённому списку структур (для тестов/отладки).
+    const std::vector<StructDef>& structs() const noexcept { return struct_defs_; }
+
 private:
     // --- декларации ---
     void lower_decls(const std::vector<std::unique_ptr<ast::Decl>>& decls,
@@ -394,6 +408,8 @@ private:
     std::shared_ptr<sema::Scope> module_scope_;
 
     std::vector<Function> functions_;
+    std::vector<StructDef> struct_defs_;
+    std::vector<std::pair<std::string, std::string>> type_aliases_;
     Function* current_fn_ = nullptr;
     int next_temp_ = 0;
     int next_label_ = 0;
@@ -411,6 +427,8 @@ Module Lowerer::lower() {
     m.name = prog_.module_name;
     lower_decls(prog_.decls, /*prefix=*/"");
     m.functions = std::move(functions_);
+    m.structs = std::move(struct_defs_);
+    m.type_aliases = std::move(type_aliases_);
     return m;
 }
 
@@ -427,8 +445,19 @@ void Lowerer::lower_decls(
         } else if (auto* im = dynamic_cast<const ast::ImplDecl*>(d.get())) {
             // Методы импла — на верхнем уровне (impl уровня namespace в v1 запрещён).
             lower_impl(*im);
+        } else if (auto* sd = dynamic_cast<const ast::StructDecl*>(d.get())) {
+            // Сохраняем позиционную раскладку для бэкендов (LLVM нужны индексы полей).
+            StructDef def;
+            def.name = sd->name;
+            def.fields.reserve(sd->fields.size());
+            for (const auto& f : sd->fields) {
+                def.fields.emplace_back(f.name, ast_type_to_str(*f.type));
+            }
+            struct_defs_.push_back(std::move(def));
+        } else if (auto* ta = dynamic_cast<const ast::TypeAliasDecl*>(d.get())) {
+            type_aliases_.emplace_back(ta->name, ast_type_to_str(*ta->target));
         }
-        // struct / type alias / module / import не порождают IR-кода.
+        // module / import не порождают IR-кода.
     }
 }
 

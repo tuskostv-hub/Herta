@@ -47,6 +47,10 @@ public:
     // Вызывать только после успешного compile().
     void dump_ir(std::ostream& os) const;
 
+    // Лоуэрит все модули в IR (с оптимизациями, если включены) и возвращает
+    // их в топологическом порядке. Вызывать только после успешного compile().
+    std::vector<herta::ir::Module> lower_all() const;
+
 private:
     bool load_recursive(const std::filesystem::path& path);
 
@@ -102,12 +106,21 @@ bool Driver::compile(const std::filesystem::path& root_file) {
     return true;
 }
 
-void Driver::dump_ir(std::ostream& os) const {
+std::vector<herta::ir::Module> Driver::lower_all() const {
+    std::vector<herta::ir::Module> result;
+    result.reserve(modules_.size());
     for (const auto& mod : modules_) {
         if (!mod->sema) continue;
         herta::ir::Lowerer lower(*mod->program, *mod->sema);
         auto ir_mod = lower.lower();
         if (optimize_) herta::ir::optimize_module(ir_mod);
+        result.push_back(std::move(ir_mod));
+    }
+    return result;
+}
+
+void Driver::dump_ir(std::ostream& os) const {
+    for (const auto& ir_mod : lower_all()) {
         herta::ir::dump_module(ir_mod, os);
     }
 }

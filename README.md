@@ -1,12 +1,15 @@
 # Herta
 
 Учебный компилятор статически типизированного языка программирования. Синтаксис
-вдохновлён Go, Rust и Odin. Целевая платформа — x86-64.
+вдохновлён Go, Rust и Odin. Программа компилируется в трёхадресный IR и затем
+либо переводится в LLVM IR и собирается clang-ом в нативный x86-64 бинарь
+(путь по умолчанию), либо исполняется встроенной регистровой ВМ (`--interp`).
 
 Полная спецификация языка — в каталоге [specs/](specs/):
 - [grammar.md](specs/grammar.md) — лексика и синтаксис (EBNF)
 - [semantics.md](specs/semantics.md) — семантика конструкций
 - [types.md](specs/types.md) — система типов
+- [codegen.md](specs/codegen.md) — модель исполнения (интерпретатор IR)
 
 План разработки — [impl_plan.md](impl_plan.md).
 
@@ -32,13 +35,18 @@ cmake --build build
 ## Запуск
 
 ```bash
-./build/myc <source.herta>                # компиляция
-./build/myc <source.herta> --dump-tokens  # вывести поток токенов
-./build/myc <source.herta> --dump-ast     # вывести AST (на этапе парсера)
-./build/myc <source.herta> --dump-ir      # вывести трёхадресный IR (после оптимизаций)
-./build/myc <source.herta> --dump-ir --no-opt   # ... без constant folding / DCE
-./build/myc <source.herta> -o <output>    # указать имя выходного файла
+./build/myc <source.herta>                # скомпилировать в нативный бинарь
+./build/myc <source.herta> -o prog        # … с указанием имени
+./build/myc <source.herta> --run          # скомпилировать и сразу запустить
+./build/myc <source.herta> --interp       # исполнить через встроенную ВМ
+./build/myc <source.herta> --emit-llvm    # вывести .ll в stdout
+./build/myc <source.herta> --dump-tokens  # поток токенов
+./build/myc <source.herta> --dump-ast     # AST
+./build/myc <source.herta> --dump-ir      # трёхадресный IR (после оптимизаций)
+./build/myc <source.herta> --dump-ir --no-opt   # … без constant folding / DCE
 ```
+
+Код завершения исполненной программы — значение, возвращённое из `main`.
 
 ## Тесты
 

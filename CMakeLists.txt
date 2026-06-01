@@ -80,11 +80,24 @@ target_sources(herta_core
             src/parser/parser.cppm
             src/semantic/semantic.cppm
             src/ir/ir.cppm
+            src/codegen/interp.cppm
+            src/codegen/llvm_emit.cppm
             src/driver/driver.cppm
 )
 
 add_executable(myc src/main.cpp)
 target_link_libraries(myc PRIVATE herta_core)
+
+# Пути к внешним инструментам/файлам, нужные myc в run-time:
+#   * HERTA_CLANG_PATH    — C-компилятор для сборки runtime.c + линковки .ll;
+#                           обязательно clang (а не clang++), чтобы runtime.c
+#                           компилировался в C-режиме без name-mangling.
+#   * HERTA_RUNTIME_C     — C-runtime для линковки в итоговый бинарь.
+string(REPLACE "clang++" "clang" HERTA_C_COMPILER "${CMAKE_CXX_COMPILER}")
+target_compile_definitions(myc PRIVATE
+    HERTA_CLANG_PATH="${HERTA_C_COMPILER}"
+    HERTA_RUNTIME_C="${CMAKE_SOURCE_DIR}/src/codegen/runtime.c"
+)
 
 # Convenience targets.
 add_custom_target(run

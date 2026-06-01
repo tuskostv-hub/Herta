@@ -1085,6 +1085,16 @@ std::optional<Type> SemanticAnalyzer::check_binary(const ast::BinaryExpr& b,
         }
         return Type(Primitive::Bool);
     }
+    // Struct == / != — номинально (по имени типа), поэлементно по полям.
+    if ((op == Op::Eq || op == Op::NotEq) && a->is_struct() && c->is_struct()) {
+        if (!a->same_as(*c)) {
+            error(b.loc, std::format(
+                "cannot compare structs of different types: '{}' and '{}'",
+                a->to_string(), c->to_string()));
+            return std::nullopt;
+        }
+        return Type(Primitive::Bool);
+    }
 
     // Numeric ops.
     if (!a->is_primitive() || !c->is_primitive()) {
