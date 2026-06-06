@@ -106,6 +106,31 @@ export struct ArrayType : TypeExpr {
     }
 };
 
+// `*T` — указатель на T (A.2.14). T может быть `void` (raw pointer, A.3.7).
+export struct PointerType : TypeExpr {
+    std::unique_ptr<TypeExpr> pointee;
+
+    void dump(std::ostream& os, int level) const override {
+        indent(os, level);
+        os << "PointerType\n";
+        pointee->dump(os, level + 1);
+    }
+};
+
+// `fn(T1, T2) R` — указатель на функцию (A.3.7).
+export struct FnPointerType : TypeExpr {
+    std::vector<std::unique_ptr<TypeExpr>> params;
+    std::unique_ptr<TypeExpr> return_type;
+
+    void dump(std::ostream& os, int level) const override {
+        indent(os, level);
+        os << "FnPointerType\n";
+        for (const auto& p : params) p->dump(os, level + 1);
+        indent(os, level + 1); os << "->\n";
+        return_type->dump(os, level + 2);
+    }
+};
+
 // ===========================================================================
 // Expr — выражения (§3.4 grammar.md)
 // ===========================================================================
@@ -161,6 +186,36 @@ export struct CharLit : Expr {
     void dump(std::ostream& os, int level) const override {
         indent(os, level);
         os << "CharLit " << lexeme << '\n';
+    }
+};
+
+// `null` — нулевой указатель (A.2.14). Тип присваивается семантикой из контекста.
+export struct NullLit : Expr {
+    void dump(std::ostream& os, int level) const override {
+        indent(os, level);
+        os << "NullLit\n";
+    }
+};
+
+// `&expr` — взятие адреса. operand обязан быть lvalue (Ident/Field/Index/Deref).
+export struct AddressOfExpr : Expr {
+    std::unique_ptr<Expr> operand;
+
+    void dump(std::ostream& os, int level) const override {
+        indent(os, level);
+        os << "AddressOf\n";
+        operand->dump(os, level + 1);
+    }
+};
+
+// `*expr` — разыменование. Является lvalue (можно `*p = …`).
+export struct DerefExpr : Expr {
+    std::unique_ptr<Expr> operand;
+
+    void dump(std::ostream& os, int level) const override {
+        indent(os, level);
+        os << "Deref\n";
+        operand->dump(os, level + 1);
     }
 };
 
@@ -420,11 +475,13 @@ export struct FnDecl : Decl {
     std::string name;
     std::vector<Param> params;
     std::unique_ptr<TypeExpr> return_type;
-    std::unique_ptr<BlockStmt> body;
+    std::unique_ptr<BlockStmt> body;  // nullptr для extern fn (A.3.12)
+    bool is_extern = false;            // extern fn: только сигнатура, тело отсутствует
 
     void dump(std::ostream& os, int level) const override {
         indent(os, level);
-        os << (is_pub ? "pub " : "") << "Fn '" << name << "'\n";
+        os << (is_pub ? "pub " : "") << (is_extern ? "extern " : "")
+           << "Fn '" << name << "'\n";
         if (!params.empty()) {
             indent(os, level + 1); os << "params:\n";
             for (const auto& p : params) {
@@ -434,7 +491,7 @@ export struct FnDecl : Decl {
         }
         indent(os, level + 1); os << "return:\n";
         return_type->dump(os, level + 2);
-        body->dump(os, level + 1);
+        if (body) body->dump(os, level + 1);
     }
 };
 

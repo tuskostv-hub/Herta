@@ -274,7 +274,7 @@ int main() {
     check_error(R"("bad \q escape")", "err bad escape \\q");
     check_error("0x", "err empty hex literal");
     check_error("0xZ", "err non-hex digit");
-    check_error("a & b", "err lone &");
+    // Одиночный `&` — теперь валиден (address-of, A.2.14).
     check_error("a | b", "err lone |");
     check_error("a @ b", "err invalid character @");
     check_error("1.0e", "err exponent without digit");

@@ -33,11 +33,12 @@ namespace ir = herta::ir;
 // ===========================================================================
 
 struct TypeInfo {
-    enum class Kind { Int, UInt, Float, Bool, Char, String, Void, Array, Struct };
+    enum class Kind { Int, UInt, Float, Bool, Char, String, Void, Byte,
+                      Array, Struct, Pointer };
     Kind kind = Kind::Void;
     int bits = 0;                 // для int/uint/float
     int array_size = 0;           // для Array
-    std::string elem_or_name;     // элемент для Array, имя для Struct
+    std::string elem_or_name;     // элемент для Array/Pointer, имя для Struct
 };
 
 bool is_digit(char c) { return c >= '0' && c <= '9'; }
@@ -47,9 +48,16 @@ TypeInfo parse_type(std::string_view t) {
     if (t == "void" || t.empty()) { r.kind = TypeInfo::Kind::Void; return r; }
     if (t == "bool")   { r.kind = TypeInfo::Kind::Bool; return r; }
     if (t == "char")   { r.kind = TypeInfo::Kind::Char; return r; }
+    if (t == "byte")   { r.kind = TypeInfo::Kind::Byte; return r; }
     if (t == "string") { r.kind = TypeInfo::Kind::String; return r; }
     if (t == "float32") { r.kind = TypeInfo::Kind::Float; r.bits = 32; return r; }
     if (t == "float64") { r.kind = TypeInfo::Kind::Float; r.bits = 64; return r; }
+    // *T — указатель (A.2.14)
+    if (!t.empty() && t.front() == '*') {
+        r.kind = TypeInfo::Kind::Pointer;
+        r.elem_or_name = std::string(t.substr(1));
+        return r;
+    }
     auto try_prefix = [&](std::string_view p, TypeInfo::Kind k) {
         if (t.size() > p.size() && t.starts_with(p)) {
             int bits = 0;
@@ -94,6 +102,7 @@ std::string llvm_type(const TypeInfo& ti) {
         case TypeInfo::Kind::Void:   return "void";
         case TypeInfo::Kind::Bool:   return "i1";
         case TypeInfo::Kind::Char:   return "i32";
+        case TypeInfo::Kind::Byte:   return "i8";
         case TypeInfo::Kind::Int:
         case TypeInfo::Kind::UInt:   return std::format("i{}", ti.bits);
         case TypeInfo::Kind::Float:  return ti.bits == 32 ? "float" : "double";
@@ -103,6 +112,7 @@ std::string llvm_type(const TypeInfo& ti) {
             return std::format("[{} x {}]", ti.array_size, llvm_type(el));
         }
         case TypeInfo::Kind::Struct: return "%struct." + ti.elem_or_name;
+        case TypeInfo::Kind::Pointer: return "ptr";  // opaque LLVM pointer
     }
     return "void";
 }
@@ -348,15 +358,18 @@ void Emitter::emit_runtime_decls() {
         "declare void @herta_panic(%struct.herta_string) noreturn\n"
         "declare void @herta_assert_fail(i64) noreturn\n"
         "declare void @herta_rt_div_zero(i64) noreturn\n"
-        "declare void @herta_rt_oob(i64, i64, i64) noreturn\n\n";
+        "declare void @herta_rt_oob(i64, i64, i64) noreturn\n"
+        "declare void @herta_rt_null_deref(i64) noreturn\n\n";
 }
 
 void Emitter::emit_string_globals() {
-    // Кладём в конец — допустимо для LLVM IR.
+    // Кладём в конец — допустимо для LLVM IR. Все литералы null-терминированы
+    // (последний байт — \00), чтобы их `.data` можно было передавать в C как
+    // `const char*` без дополнительной конверсии (A.3.12).
     for (std::size_t i = 0; i < strings_.size(); ++i) {
         const auto& s = strings_[i];
         out_ += std::format("@.str.{} = private unnamed_addr constant [{} x i8] c\"",
-                            i, s.size());
+                            i, s.size() + 1);
         for (unsigned char c : s) {
             if (c == '"' || c == '\\' || c < 0x20 || c >= 0x7F) {
                 out_ += std::format("\\{:02X}", c);
@@ -364,7 +377,7 @@ void Emitter::emit_string_globals() {
                 out_.push_back(static_cast<char>(c));
             }
         }
-        out_ += "\"\n";
+        out_ += "\\00\"\n";
     }
 }
 
@@ -384,6 +397,12 @@ int Emitter::field_index(const std::string& struct_name,
 
 std::string Emitter::mangle(std::size_t mod_idx, const std::string& fn_name) const {
     if (fn_name == "main") return "main";
+    // Extern (C) функции: используем имя как есть, без префикса модуля,
+    // чтобы линкер нашёл символ libc (printf и т.п.). См. A.3.12.
+    if (auto it = mod_funcs_[mod_idx].find(fn_name);
+        it != mod_funcs_[mod_idx].end() && it->second->is_extern) {
+        return fn_name;
+    }
     return modules_[mod_idx].name + "." + fn_name;
 }
 
@@ -424,6 +443,7 @@ void Emitter::infer_types(FnState& st) {
             case K::BoolC:   return "bool";
             case K::CharC:   return "char";
             case K::StringC: return "string";
+            case K::NullC:   return "*void";  // null приведётся к любому *T
             case K::Unit:    return "void";
             case K::Var: {
                 auto it = st.var_ty.find(o.str_v);
@@ -519,6 +539,19 @@ void Emitter::infer_types(FnState& st) {
             case IK::MakeStruct:
                 set_dst(ins.type_name);
                 break;
+            // A.2.14: указатели.
+            case IK::AddressOf: {
+                auto at = operand_type(ins.a);
+                if (!at.empty()) set_dst("*" + at);
+                break;
+            }
+            case IK::LoadPtr: {
+                auto at = operand_type(ins.a);
+                auto ti = parse_type(at);
+                if (ti.kind == TypeInfo::Kind::Pointer) set_dst(ti.elem_or_name);
+                break;
+            }
+            case IK::StorePtr: break;  // нет dst
             default: break;
         }
     }
@@ -549,6 +582,19 @@ void Emitter::ensure_alloca_temp(FnState& st, std::int64_t id,
 }
 
 void Emitter::emit_function(std::size_t mod_idx, const ir::Function& fn) {
+    // Extern (C) функции — только declare, без тела (A.3.12).
+    if (fn.is_extern) {
+        auto canonical = mangle(mod_idx, fn.name);
+        out_ += std::format("declare {} @{}(",
+                             llvm_type(fn.return_type), canonical);
+        for (std::size_t i = 0; i < fn.params.size(); ++i) {
+            if (i) out_ += ", ";
+            out_ += llvm_type(fn.params[i].type_str);
+        }
+        out_ += ")\n\n";
+        return;
+    }
+
     FnState st;
     st.mod = &modules_[mod_idx];
     st.fn = &fn;
@@ -603,6 +649,7 @@ std::pair<std::string, std::string>
 Emitter::eval_operand(FnState& st, const ir::Operand& o) {
     using K = ir::OperandKind;
     switch (o.kind) {
+        case K::NullC:   return { "null", "*void" };
         case K::IntC:    return { std::to_string(o.int_v), "int64" };
         case K::FloatC: {
             // LLVM требует точное hex-представление для double, иначе теряем биты.
@@ -677,6 +724,22 @@ std::string Emitter::widen(FnState& st, const std::string& value,
     if (from_ty == to_ty) return value;
     auto a = parse_type(from_ty);
     auto b = parse_type(to_ty);
+
+    // A.3.12: конверсия `string → *byte` / `*void` для FFI границы.
+    // Берём поле .data из herta_string-агрегата.
+    if (a.kind == TypeInfo::Kind::String && b.kind == TypeInfo::Kind::Pointer) {
+        auto v = fresh_ssa(st);
+        st.body += std::format(
+            "  {} = extractvalue %struct.herta_string {}, 1\n", v, value);
+        return v;
+    }
+
+    // Pointer ↔ pointer (A.2.14/A.3.7): LLVM использует opaque `ptr` —
+    // приведение не порождает инструкции.
+    if (a.kind == TypeInfo::Kind::Pointer && b.kind == TypeInfo::Kind::Pointer) {
+        return value;
+    }
+
     auto la = llvm_type(a);
     auto lb = llvm_type(b);
     if (la == lb) return value;
@@ -842,6 +905,52 @@ void Emitter::emit_instr(FnState& st, const ir::Instr& ins) {
         }
         case IK::MakeArray:  emit_make_array(st, ins); return;
         case IK::MakeStruct: emit_make_struct(st, ins); return;
+        // A.2.14: указатели.
+        case IK::AddressOf: {
+            // ins.a — Var/Temp. Их alloca-адрес и есть указатель.
+            std::string addr;
+            if (ins.a.kind == ir::OperandKind::Var) addr = st.var_addr.at(ins.a.str_v);
+            else                                    addr = st.temp_addr.at(ins.a.int_v);
+            store_to(st, ins.dst, addr, st.temp_ty[ins.dst.int_v]);
+            return;
+        }
+        case IK::LoadPtr: {
+            auto [p, pty] = eval_operand(st, ins.a);
+            // Тип результата = pointee, определён infer'ом.
+            std::string dst_ty;
+            if (ins.dst.kind == ir::OperandKind::Var) dst_ty = st.var_ty[ins.dst.str_v];
+            else                                       dst_ty = st.temp_ty[ins.dst.int_v];
+            // null-check.
+            auto null_cmp = fresh_ssa(st);
+            st.body += std::format("  {} = icmp eq ptr {}, null\n", null_cmp, p);
+            auto ok = std::format("nullok_{}", st.ssa_counter++);
+            auto bad = std::format("nullbad_{}", st.ssa_counter++);
+            st.body += std::format("  br i1 {}, label %{}, label %{}\n", null_cmp, bad, ok);
+            st.body += std::format("{}:\n", bad);
+            st.body += std::format("  call void @herta_rt_null_deref(i64 {})\n", ins.loc.line);
+            st.body += "  unreachable\n";
+            st.body += std::format("{}:\n", ok);
+            auto v = fresh_ssa(st);
+            st.body += std::format("  {} = load {}, ptr {}\n", v, llvm_type(dst_ty), p);
+            store_to(st, ins.dst, v, dst_ty);
+            return;
+        }
+        case IK::StorePtr: {
+            auto [p, pty] = eval_operand(st, ins.a);
+            auto [v, vty] = eval_operand(st, ins.value_to_store);
+            // null-check.
+            auto null_cmp = fresh_ssa(st);
+            st.body += std::format("  {} = icmp eq ptr {}, null\n", null_cmp, p);
+            auto ok = std::format("snullok_{}", st.ssa_counter++);
+            auto bad = std::format("snullbad_{}", st.ssa_counter++);
+            st.body += std::format("  br i1 {}, label %{}, label %{}\n", null_cmp, bad, ok);
+            st.body += std::format("{}:\n", bad);
+            st.body += std::format("  call void @herta_rt_null_deref(i64 {})\n", ins.loc.line);
+            st.body += "  unreachable\n";
+            st.body += std::format("{}:\n", ok);
+            st.body += std::format("  store {} {}, ptr {}\n", llvm_type(vty), v, p);
+            return;
+        }
     }
 }
 

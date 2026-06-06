@@ -49,7 +49,7 @@ private:
     bool parse_module_header(ast::Program& prog);
     bool parse_imports(ast::Program& prog);
     std::unique_ptr<ast::Decl> parse_top_level();
-    std::unique_ptr<ast::FnDecl> parse_fn_decl();
+    std::unique_ptr<ast::FnDecl> parse_fn_decl(bool is_extern = false);
     std::unique_ptr<ast::StructDecl> parse_struct_decl();
     std::unique_ptr<ast::TypeAliasDecl> parse_type_alias_decl();
     std::unique_ptr<ast::NamespaceDecl> parse_namespace_decl();
@@ -351,6 +351,18 @@ std::unique_ptr<ast::Decl> Parser::parse_top_level() {
     std::unique_ptr<ast::Decl> d;
     switch (current().kind) {
         case TokenKind::KwFn:        d = parse_fn_decl(); break;
+        case TokenKind::KwExtern: {
+            // `extern fn name(args) ret;` — без тела (A.3.12).
+            advance();  // 'extern'
+            if (!check(TokenKind::KwFn)) {
+                error("'extern' must be followed by 'fn'");
+                return nullptr;
+            }
+            auto fn = parse_fn_decl(/*is_extern=*/true);
+            if (!fn) return nullptr;
+            d = std::move(fn);
+            break;
+        }
         case TokenKind::KwStruct:    d = parse_struct_decl(); break;
         case TokenKind::KwType:      d = parse_type_alias_decl(); break;
         case TokenKind::KwNamespace: d = parse_namespace_decl(); break;
@@ -379,7 +391,7 @@ std::unique_ptr<ast::Decl> Parser::parse_top_level() {
     return d;
 }
 
-std::unique_ptr<ast::FnDecl> Parser::parse_fn_decl() {
+std::unique_ptr<ast::FnDecl> Parser::parse_fn_decl(bool is_extern) {
     auto start = current().loc;
     advance();  // 'fn'
 
@@ -416,8 +428,14 @@ std::unique_ptr<ast::FnDecl> Parser::parse_fn_decl() {
     auto ret_type = parse_type_expr();
     if (!ret_type) return nullptr;
 
-    auto body = parse_block();
-    if (!body) return nullptr;
+    std::unique_ptr<ast::BlockStmt> body;
+    if (is_extern) {
+        if (!expect(TokenKind::Semicolon, "';' after extern fn declaration"))
+            return nullptr;
+    } else {
+        body = parse_block();
+        if (!body) return nullptr;
+    }
 
     auto fn = std::make_unique<ast::FnDecl>();
     fn->loc = start;
@@ -425,6 +443,7 @@ std::unique_ptr<ast::FnDecl> Parser::parse_fn_decl() {
     fn->params = std::move(params);
     fn->return_type = std::move(ret_type);
     fn->body = std::move(body);
+    fn->is_extern = is_extern;
     return fn;
 }
 
@@ -564,6 +583,40 @@ std::unique_ptr<ast::ImplDecl> Parser::parse_impl_decl() {
 
 std::unique_ptr<ast::TypeExpr> Parser::parse_type_expr() {
     auto start = current().loc;
+
+    // *T — указатель (A.2.14)
+    if (match(TokenKind::Star)) {
+        auto pointee = parse_type_expr();
+        if (!pointee) return nullptr;
+        auto p = std::make_unique<ast::PointerType>();
+        p->loc = start;
+        p->pointee = std::move(pointee);
+        return p;
+    }
+
+    // fn(T1, T2) R — указатель на функцию (A.3.7)
+    if (match(TokenKind::KwFn)) {
+        if (!expect(TokenKind::LParen, "'(' after 'fn' in function pointer type"))
+            return nullptr;
+        std::vector<std::unique_ptr<ast::TypeExpr>> params;
+        if (!check(TokenKind::RParen)) {
+            while (true) {
+                auto pt = parse_type_expr();
+                if (!pt) return nullptr;
+                params.push_back(std::move(pt));
+                if (!match(TokenKind::Comma)) break;
+                if (check(TokenKind::RParen)) break;
+            }
+        }
+        if (!expect(TokenKind::RParen, "')' in function pointer type")) return nullptr;
+        auto ret = parse_type_expr();
+        if (!ret) return nullptr;
+        auto fp = std::make_unique<ast::FnPointerType>();
+        fp->loc = start;
+        fp->params = std::move(params);
+        fp->return_type = std::move(ret);
+        return fp;
+    }
 
     if (match(TokenKind::LBracket)) {
         // [T; N]
@@ -761,11 +814,12 @@ std::unique_ptr<ast::Stmt> Parser::parse_while_stmt() {
 }
 
 namespace {
-// Проверяет, что выражение — допустимый lvalue (Ident / Field / Index).
+// Проверяет, что выражение — допустимый lvalue (Ident / Field / Index / Deref).
 bool is_lvalue(const ast::Expr& e) {
     return dynamic_cast<const ast::IdentExpr*>(&e) != nullptr
         || dynamic_cast<const ast::FieldExpr*>(&e) != nullptr
-        || dynamic_cast<const ast::IndexExpr*>(&e) != nullptr;
+        || dynamic_cast<const ast::IndexExpr*>(&e) != nullptr
+        || dynamic_cast<const ast::DerefExpr*>(&e) != nullptr;  // A.2.14: *p = …
 }
 }  // anonymous namespace
 
@@ -942,6 +996,28 @@ std::unique_ptr<ast::Expr> Parser::parse_unary_expr() {
         u->operand = std::move(operand);
         return u;
     }
+    // &expr — address-of (A.2.14).
+    if (check(TokenKind::Amp)) {
+        auto op_loc = current().loc;
+        advance();
+        auto operand = parse_unary_expr();
+        if (!operand) return nullptr;
+        auto a = std::make_unique<ast::AddressOfExpr>();
+        a->loc = op_loc;
+        a->operand = std::move(operand);
+        return a;
+    }
+    // *expr — разыменование (A.2.14). Является lvalue.
+    if (check(TokenKind::Star)) {
+        auto op_loc = current().loc;
+        advance();
+        auto operand = parse_unary_expr();
+        if (!operand) return nullptr;
+        auto d = std::make_unique<ast::DerefExpr>();
+        d->loc = op_loc;
+        d->operand = std::move(operand);
+        return d;
+    }
     return parse_postfix_expr();
 }
 
@@ -1079,6 +1155,12 @@ std::unique_ptr<ast::Expr> Parser::parse_primary_expr() {
             auto n = std::make_unique<ast::BoolLit>();
             n->loc = loc;
             n->value = false;
+            return n;
+        }
+        case TokenKind::KwNull: {
+            advance();
+            auto n = std::make_unique<ast::NullLit>();
+            n->loc = loc;
             return n;
         }
         case TokenKind::StringLiteral: {

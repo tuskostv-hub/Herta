@@ -25,3 +25,14 @@ compile_commands.json
 .idea/
 .cache/
 *.swp
+
+# Outputs of `./build/myc examples/<X>.herta` (default output = ./<X> at cwd).
+# Запускай с `-o build/<X>` или `--run`, чтобы не плодить бинарники в корне.
+/bubble_sort
+/calc
+/ffi_demo
+/hello
+/lib_demo
+/v1_features
+/Math
+/MathLib

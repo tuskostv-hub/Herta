@@ -15,9 +15,9 @@
 | **A.3.6** | Контроль видимости в модульной системе | **Готово** — `pub` строго разграничивает экспорт; приватные имена недоступны через `M.x` |
 | **B.2.1** | Промежуточное представление (IR) | **Готово** — линейный трёхадресный код, `--dump-ir` |
 | **B.2.2** | Оптимизации IR (constant folding + DCE) | **Готово** — `optimize_module`, отключается `--no-opt` |
-| **B.2.3** | Виртуальная машина (исполнитель IR) | **Готово** — регистровая ВМ `herta.interp`, см. `specs/codegen.md` |
-| ~~A.3.11~~ | Стандартная библиотека на языке | Не претендую (требует pointers/memory/generics, см. ТЗ). Есть пример `MathLib.herta` поверх A.2.13 |
-| Остальные A.x.x / B.x.x | — | Не планируются |
+| **A.2.14** | Указатели | **Готово** — `*T`, `&x`, `*p` (rvalue/lvalue), `null` + runtime-проверка, тип `byte` |
+| **A.3.7** | Сырые указатели | **Готово** (частично) — `*void`/`*byte` raw, type `byte` (non-arithmetic), приведения указателей; **function pointers — нет** (диагностика) |
+| **A.3.12** | FFI / интероп с C | **Готово** — `extern fn`, System V ABI через clang, неявная конверсия `string → *byte`; пример: `examples/ffi_demo.herta` зовёт `puts`/`printf` из libc |
 
 ---
 
@@ -428,24 +428,20 @@ Pipeline (однофайловая компиляция):
         ↓
    [Optimizer]    → constant folding + DCE
         ↓
-   [Интерпретатор IR] → прямое исполнение (регистровая ВМ)
+   [LLVM emitter] → текстовый LLVM IR → clang → нативный x86-64 ELF
         ↓
-   Код завершения процесса
+   Исполняемый файл
 ```
 
 - **Этап 3 — парсер.** ✓ Готов. Recursive Descent, отдельный subparser для выражений по таблице приоритетов §3.4 grammar. Парсит `module`/`import`/`pub`-префиксы (хранятся в AST для будущего), `impl`-блоки, всё остальное по grammar.md.
 - **Этап 4 — семантика.** ✓ Готов (v1). Symbol table со scope-стеком, lexical scoping с shadowing, type checker с неявными приведениями (§5.4 types.md), литерал-narrowing (`let x: int8 = 42`), проверка mutability (`let`/`var`), валидация `break`/`continue` внутри циклов, проверка типов условий `if`/`while`, проверка типа возврата. **Не реализованы:** `impl`-методы (TODO v2), межмодульный `import` (TODO для «Доп»), exhaustive return-path analysis (всегда требуется явный `return` в конце пути — но компилятор пока не падает если его нет).
 - **Этап 5 — IR (lowering).** ✓ Готов. Линейный трёхадресный код: `t = a OP b`, `t = call f(args)`, `goto L`, `if t goto L`, `label L`. Печать в текстовом виде (`--dump-ir`).
 - **Этап 6 — оптимизатор IR.** ✓ Готов. **Constant folding** + простой **DCE**, итеративно до фиксации. Отключается флагом `--no-opt`.
-- **Этап 7 — исполнение.** ✓ Готов. Реализованы оба пути из ТЗ:
-  - **LLVM IR + clang** (по умолчанию): модуль `herta.llvm` печатает текстовый LLVM IR, `myc` зовёт `clang-22` для сборки нативного бинаря; runtime — `src/codegen/runtime.c`.
-  - **Интерпретатор IR** (`--interp`, fallback): регистровая ВМ `herta.interp` исполняет IR напрямую.
-
-  Оба пути читают один и тот же `ir::Module`, что подтверждено тестами (каждый кейс гоняется обоими бэкендами). Решение и детали — в `specs/codegen.md`.
+- **Этап 7 — кодогенерация.** ✓ Готов. Путь **LLVM IR + clang**: модуль `herta.llvm` печатает текстовый LLVM IR, `myc` зовёт `clang-22` для сборки нативного x86-64 ELF; runtime — `src/codegen/runtime.c`. Подробности — в `specs/codegen.md`.
 
 CLI:
 ```
-myc <source.herta> [--dump-tokens] [--dump-ast] [--dump-ir] [--no-opt]
+myc <source.herta> [-o <out>] [--run] [--emit-llvm] [--dump-tokens] [--dump-ast] [--dump-ir] [--no-opt]
 ```
 Один входной файл — один результат.
 

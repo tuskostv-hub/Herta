@@ -3,6 +3,6 @@
 module hello;
 
 fn main() int32 {
-    print("Hello, Herta!");
+    print("Kuru~ Kuru~");
     return 0;
 }

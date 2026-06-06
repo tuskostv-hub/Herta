@@ -18,9 +18,10 @@ add_executable(test_ir ir/test_ir.cpp)
 target_link_libraries(test_ir PRIVATE herta_core)
 add_test(NAME ir.lowering COMMAND test_ir)
 
-# Интеграционный тест исполнителя: запускает бинарь myc на подпроцессах.
-add_executable(test_interp interp/test_interp.cpp)
-target_link_libraries(test_interp PRIVATE herta_core)
-target_compile_definitions(test_interp PRIVATE MYC_PATH="$<TARGET_FILE:myc>")
-add_dependencies(test_interp myc)
-add_test(NAME interp.run COMMAND test_interp)
+# End-to-end интеграционный тест: компилирует каждый кейс через myc --run
+# и проверяет stdout + код возврата.
+add_executable(test_e2e e2e/test_e2e.cpp)
+target_link_libraries(test_e2e PRIVATE herta_core)
+target_compile_definitions(test_e2e PRIVATE MYC_PATH="$<TARGET_FILE:myc>")
+add_dependencies(test_e2e myc)
+add_test(NAME e2e.run COMMAND test_e2e)

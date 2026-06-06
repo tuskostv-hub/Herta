@@ -131,3 +131,10 @@ void herta_rt_oob(int64_t idx, int64_t size, int64_t line) {
             (long long)idx, (long long)size, (long long)line);
     exit(1);
 }
+
+void herta_rt_null_deref(int64_t line) {
+    fflush(stdout);
+    fprintf(stderr, "runtime error: null pointer dereference at line %lld\n",
+            (long long)line);
+    exit(1);
+}

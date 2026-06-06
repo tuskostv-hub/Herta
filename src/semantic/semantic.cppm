@@ -26,21 +26,25 @@ export enum class Primitive : std::uint8_t {
     U8, U16, U32, U64,
     F32, F64,
     Bool, String, Char, Void,
+    Byte,  // A.3.7: 1-байтный raw-тип, не арифметический
 };
 
 export struct ArrayTy;
 export struct StructTy;
+export struct PointerTy;
 
 export class Type {
 public:
     using Repr = std::variant<Primitive,
                               std::shared_ptr<ArrayTy>,
-                              std::shared_ptr<StructTy>>;
+                              std::shared_ptr<StructTy>,
+                              std::shared_ptr<PointerTy>>;
 
     Type() : repr_(Primitive::Void) {}
     explicit Type(Primitive p) : repr_(p) {}
     explicit Type(std::shared_ptr<ArrayTy> a) : repr_(std::move(a)) {}
     explicit Type(std::shared_ptr<StructTy> s) : repr_(std::move(s)) {}
+    explicit Type(std::shared_ptr<PointerTy> p) : repr_(std::move(p)) {}
 
     bool is_primitive() const noexcept {
         return std::holds_alternative<Primitive>(repr_);
@@ -68,6 +72,16 @@ public:
         return std::get<std::shared_ptr<StructTy>>(repr_);
     }
 
+    bool is_pointer() const noexcept {
+        return std::holds_alternative<std::shared_ptr<PointerTy>>(repr_);
+    }
+    const PointerTy& pointer() const noexcept {
+        return *std::get<std::shared_ptr<PointerTy>>(repr_);
+    }
+    std::shared_ptr<PointerTy> pointer_ptr() const {
+        return std::get<std::shared_ptr<PointerTy>>(repr_);
+    }
+
     bool is_void() const noexcept { return is(Primitive::Void); }
     bool is_bool() const noexcept { return is(Primitive::Bool); }
     bool is_string() const noexcept { return is(Primitive::String); }
@@ -90,6 +104,13 @@ struct StructTy {
     SourceLocation loc;
 };
 
+struct PointerTy {
+    Type pointee;
+    // is_raw: указатель «без типа» (`*void` / `*byte` рассматриваются как сырые),
+    // приводится к любому другому указателю без явного cast'а (A.3.7).
+    bool is_raw = false;
+};
+
 bool Type::same_as(const Type& o) const noexcept {
     if (repr_.index() != o.repr_.index()) return false;
     if (is_primitive()) return prim() == o.prim();
@@ -97,6 +118,9 @@ bool Type::same_as(const Type& o) const noexcept {
         const auto& a = array();
         const auto& b = o.array();
         return a.size == b.size && a.element.same_as(b.element);
+    }
+    if (is_pointer()) {
+        return pointer().pointee.same_as(o.pointer().pointee);
     }
     // nominal struct: identity by shared_ptr
     return std::get<std::shared_ptr<StructTy>>(repr_)
@@ -120,12 +144,16 @@ std::string Type::to_string() const {
             case Primitive::String: return "string";
             case Primitive::Char: return "char";
             case Primitive::Void: return "void";
+            case Primitive::Byte: return "byte";
         }
         return "?";
     }
     if (is_array()) {
         return std::format("[{}; {}]",
                           array().element.to_string(), array().size);
+    }
+    if (is_pointer()) {
+        return "*" + pointer().pointee.to_string();
     }
     if (is_struct()) return strukt().name;
     return "?";
@@ -179,17 +207,27 @@ bool can_implicit_convert(const Type& from, const Type& to) noexcept {
     if (from.same_as(to)) return true;
     if (from.is_primitive() && to.is_primitive())
         return can_widen_prim(from.prim(), to.prim());
+    // Указатели (A.2.14/A.3.7): null → любой *T; raw pointer (*void/*byte) ↔ типизированный.
+    if (from.is_pointer() && to.is_pointer()) {
+        if (from.pointer().is_raw || to.pointer().is_raw) return true;
+        return from.pointer().pointee.same_as(to.pointer().pointee);
+    }
+    // A.3.12: `string` → raw pointer (для границы с C). Конверсия в .data.
+    if (from.is_string() && to.is_pointer() && to.pointer().is_raw) return true;
     return false;
 }
 
 // Explicit cast (types.md §5.1/5.2).
 bool can_explicit_cast(const Type& from, const Type& to) noexcept {
     if (from.same_as(to)) return true;
+    // Указатели → указатели: любой → любой (A.3.7).
+    if (from.is_pointer() && to.is_pointer()) return true;
     if (!from.is_primitive() || !to.is_primitive()) return false;
     auto a = from.prim(), b = to.prim();
     if (a == Primitive::Bool || b == Primitive::Bool) return false;
     if (a == Primitive::String || b == Primitive::String) return false;
     if (a == Primitive::Void || b == Primitive::Void) return false;
+    if (a == Primitive::Byte || b == Primitive::Byte) return false;  // byte — non-arithmetic
     // char ↔ int/uint — получение/установка числового кода (spec §2.7).
     if (a == Primitive::Char && is_int(b)) return true;
     if (is_int(a) && b == Primitive::Char) return true;
@@ -240,6 +278,7 @@ export struct Symbol {
     Type type;
     bool is_mutable = false;
     bool is_pub = false;
+    bool is_extern = false;  // A.3.12: внешняя C-функция, нет тела
     std::vector<Type> param_types;
     std::shared_ptr<Scope> ns_scope;  // Namespace / Module
 };
@@ -423,6 +462,7 @@ SemanticAnalyzer::SemanticAnalyzer(const ast::Program& prog,
     add_type("string", Primitive::String);
     add_type("char", Primitive::Char);
     add_type("void", Primitive::Void);
+    add_type("byte", Primitive::Byte);  // A.3.7: 1-байтный raw-тип
 
     auto add_fn = [&](std::string n, std::vector<Type> params, Type ret) {
         Symbol s; s.kind = Symbol::Kind::Fn; s.name = std::move(n);
@@ -566,6 +606,7 @@ bool SemanticAnalyzer::process_type_alias(const ast::TypeAliasDecl& ad,
 bool SemanticAnalyzer::process_fn_signature(const ast::FnDecl& fd, Scope& target) {
     Symbol s; s.kind = Symbol::Kind::Fn; s.name = fd.name; s.loc = fd.loc;
     s.is_pub = fd.is_pub;
+    s.is_extern = fd.is_extern;
     for (const auto& p : fd.params) {
         auto t = resolve_type(*p.type, target);
         if (!t) return false;
@@ -586,6 +627,8 @@ bool SemanticAnalyzer::process_fn_signature(const ast::FnDecl& fd, Scope& target
 }
 
 bool SemanticAnalyzer::process_fn_body(const ast::FnDecl& fd, Scope& target) {
+    // extern fn — только сигнатура, тела нет (A.3.12).
+    if (fd.is_extern) return true;
     auto sym = target.lookup_local(fd.name);
     if (!sym) return true;  // ошибка уже была
     auto saved_ret = current_return_type_;
@@ -752,6 +795,15 @@ std::optional<Type> SemanticAnalyzer::resolve_type(const ast::TypeExpr& te,
         a->size = at->size;
         return Type(std::move(a));
     }
+    // *T — указатель (A.2.14). *void и *byte — raw pointers (A.3.7).
+    if (auto* pt = dynamic_cast<const ast::PointerType*>(&te)) {
+        auto pointee = resolve_type(*pt->pointee, scope);
+        if (!pointee) return std::nullopt;
+        auto p = std::make_shared<PointerTy>();
+        p->pointee = std::move(*pointee);
+        p->is_raw = p->pointee.is(Primitive::Void) || p->pointee.is(Primitive::Byte);
+        return Type(std::move(p));
+    }
     error(te.loc, "unsupported type expression");
     return std::nullopt;
 }
@@ -916,7 +968,8 @@ bool SemanticAnalyzer::check_while(const ast::WhileStmt& w, Scope& scope) {
 bool SemanticAnalyzer::is_lvalue(const ast::Expr& e) const {
     return dynamic_cast<const ast::IdentExpr*>(&e) != nullptr
         || dynamic_cast<const ast::FieldExpr*>(&e) != nullptr
-        || dynamic_cast<const ast::IndexExpr*>(&e) != nullptr;
+        || dynamic_cast<const ast::IndexExpr*>(&e) != nullptr
+        || dynamic_cast<const ast::DerefExpr*>(&e) != nullptr;  // A.2.14: *p = …
 }
 
 // ---------------------------------------------------------------------------
@@ -949,6 +1002,50 @@ std::optional<Type> SemanticAnalyzer::check_expr(const ast::Expr& e, Scope& scop
     if (auto* c = dynamic_cast<const ast::CallExpr*>(&e))      return record(check_call(*c, scope));
     if (auto* a = dynamic_cast<const ast::ArrayLit*>(&e))      return record(check_array_lit(*a, scope));
     if (auto* s = dynamic_cast<const ast::StructLit*>(&e))     return record(check_struct_lit(*s, scope));
+    // A.2.14: указатели.
+    if (dynamic_cast<const ast::NullLit*>(&e)) {
+        // null имеет тип `*void` (raw); приводится к любому *T при widening'е.
+        auto p = std::make_shared<PointerTy>();
+        p->pointee = Type(Primitive::Void);
+        p->is_raw = true;
+        return record(Type(std::move(p)));
+    }
+    if (auto* ao = dynamic_cast<const ast::AddressOfExpr*>(&e)) {
+        // &x: x должен быть lvalue (Ident/Field/Index/Deref) — результат *T.
+        // Допускается также &fn — взятие адреса функции (A.3.7 function pointer):
+        // тип результата — FnPointerTy. Реализуем позже; пока ошибка.
+        if (auto* id = dynamic_cast<const ast::IdentExpr*>(ao->operand.get())) {
+            auto sym = scope.lookup(id->name);
+            if (sym && sym->kind == Symbol::Kind::Fn) {
+                error(ao->loc,
+                      "function pointers are not yet supported (use extern fn / direct call)");
+                return std::nullopt;
+            }
+        }
+        if (!is_lvalue(*ao->operand)) {
+            error(ao->loc, "'&' requires an lvalue (variable or field/index of one)");
+            return std::nullopt;
+        }
+        auto inner = check_expr(*ao->operand, scope);
+        if (!inner) return std::nullopt;
+        auto p = std::make_shared<PointerTy>();
+        p->pointee = std::move(*inner);
+        return record(Type(std::move(p)));
+    }
+    if (auto* de = dynamic_cast<const ast::DerefExpr*>(&e)) {
+        auto inner = check_expr(*de->operand, scope);
+        if (!inner) return std::nullopt;
+        if (!inner->is_pointer()) {
+            error(de->loc, "'*' requires a pointer operand, got '" +
+                            inner->to_string() + "'");
+            return std::nullopt;
+        }
+        if (inner->pointer().pointee.is_void()) {
+            error(de->loc, "cannot dereference '*void'; cast to a typed pointer first");
+            return std::nullopt;
+        }
+        return record(inner->pointer().pointee);
+    }
     error(e.loc, "unsupported expression");
     return std::nullopt;
 }

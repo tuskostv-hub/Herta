@@ -1,9 +1,7 @@
-// Интеграционные тесты обоих бэкендов компилятора:
-//   * --interp — прямое исполнение IR (регистровая ВМ);
-//   * --run    — компиляция в нативный бинарь через LLVM + clang, затем запуск.
-// Каждый кейс прогоняется обоими путями: они обязаны давать одинаковые stdout
-// и код возврата. Тест запускает `myc` в подпроцессе, потому что runtime
-// (assert/panic/exit/runtime errors) завершают процесс через std::exit.
+// Интеграционные end-to-end тесты компилятора. Каждый кейс компилируется
+// в нативный бинарь и запускается через `myc --run`; проверяются stdout и
+// код возврата. Подпроцесс нужен потому, что runtime (assert/panic/exit/
+// runtime errors) завершают процесс через exit().
 
 #include <stdio.h>
 #include <sys/wait.h>
@@ -14,9 +12,8 @@ namespace {
 
 int failures = 0;
 
-void fail(std::string_view backend, std::string_view test,
-          std::string_view detail) {
-    std::cerr << "FAIL [" << backend << "/" << test << "] " << detail << '\n';
+void fail(std::string_view test, std::string_view detail) {
+    std::cerr << "FAIL [" << test << "] " << detail << '\n';
     ++failures;
 }
 
@@ -25,18 +22,16 @@ struct RunResult {
     int code = 0;
 };
 
-// Пишет source во временный файл и запускает myc с заданным флагом.
-RunResult run(std::string_view name, std::string_view source,
-              std::string_view backend_flag) {
-    auto dir = std::filesystem::temp_directory_path() / "herta_be_tests";
+// Пишет source во временный файл и запускает myc --run.
+RunResult run(std::string_view name, std::string_view source) {
+    auto dir = std::filesystem::temp_directory_path() / "herta_e2e_tests";
     std::filesystem::create_directories(dir);
     auto file = dir / (std::string(name) + ".herta");
     {
         std::ofstream ofs(file);
         ofs << source;
     }
-    auto cmd = std::format("{} {} {} 2>&1",
-                            MYC_PATH, file.string(), backend_flag);
+    auto cmd = std::format("{} {} --run 2>&1", MYC_PATH, file.string());
     RunResult r;
     std::FILE* pipe = popen(cmd.c_str(), "r");
     if (!pipe) { r.code = -1; return r; }
@@ -47,20 +42,17 @@ RunResult run(std::string_view name, std::string_view source,
     return r;
 }
 
-// Проверяет, что оба бэкенда дают ожидаемый код и (опционально) подстроку.
+// Проверяет, что бинарь даёт ожидаемый код и (опционально) подстроку.
 void check(std::string_view test, std::string_view src,
            int want_code, std::string_view want_substr = "") {
-    for (auto be : {std::string_view("--interp"), std::string_view("--run")}) {
-        auto r = run(test, src, be);
-        if (r.code != want_code) {
-            fail(be, test, std::format("exit {} (want {}), output: {}",
-                                        r.code, want_code, r.output));
-            continue;
-        }
-        if (!want_substr.empty() && r.output.find(want_substr) == std::string::npos) {
-            fail(be, test, std::format("output '{}' missing '{}'",
-                                        r.output, want_substr));
-        }
+    auto r = run(test, src);
+    if (r.code != want_code) {
+        fail(test, std::format("exit {} (want {}), output: {}",
+                                r.code, want_code, r.output));
+        return;
+    }
+    if (!want_substr.empty() && r.output.find(want_substr) == std::string::npos) {
+        fail(test, std::format("output '{}' missing '{}'", r.output, want_substr));
     }
 }
 
@@ -134,10 +126,30 @@ int main() {
         "  var a: [int32; 2] = [1, 2];\n"
         "  assert(mut(a) == 99);\n  assert(a[0] == 1);\n  return 0;\n}\n", 0);
 
+    // A.2.14: указатели — взятие адреса, разыменование, запись через указатель.
+    check("pointers",
+        "module pointers;\n"
+        "fn main() int32 {\n"
+        "  var x: int32 = 42;\n"
+        "  var p: *int32 = &x;\n"
+        "  assert(*p == 42);\n"
+        "  *p = 99;\n"
+        "  assert(*p == 99);\n"
+        "  return 0;\n"
+        "}\n", 0);
+
+    // A.2.14: null литерал и его проверка во время выполнения.
+    check("null_pointer",
+        "module null_pointer;\n"
+        "fn main() int32 {\n"
+        "  var p: *int32 = null;\n"
+        "  return *p;\n"  // должен упасть с null-deref
+        "}\n", 1, "null pointer dereference");
+
     if (failures == 0) {
-        std::cout << "all backend tests passed\n";
+        std::cout << "all e2e tests passed\n";
         return 0;
     }
-    std::cerr << failures << " backend test(s) failed\n";
+    std::cerr << failures << " e2e test(s) failed\n";
     return 1;
 }

@@ -42,6 +42,7 @@ export enum class OperandKind : std::uint8_t {
     Temp,        // %t<id>
     Var,         // именованная переменная / параметр
     IntC, FloatC, BoolC, StringC, CharC,
+    NullC,       // нулевой указатель (A.2.14)
     Unit,        // отсутствие значения (для void-call)
 };
 
@@ -73,6 +74,9 @@ export struct Operand {
     }
     static Operand char_c(std::uint32_t v) {
         Operand o; o.kind = OperandKind::CharC; o.char_v = v; return o;
+    }
+    static Operand null_c() {
+        Operand o; o.kind = OperandKind::NullC; return o;
     }
     static Operand unit() { return Operand{}; }
 };
@@ -110,6 +114,10 @@ export enum class InstrKind : std::uint8_t {
     Goto,         // goto label
     Branch,       // if a goto label_then else label_else
     Return,       // return [a]
+    // A.2.14: указатели.
+    AddressOf,    // dst = &a            (a — Var/Temp, dst тип *T)
+    LoadPtr,      // dst = *a            (a — Pointer value)
+    StorePtr,     // *a = value_to_store
 };
 
 export struct Instr {
@@ -153,6 +161,7 @@ export struct Function {
     std::string return_type;
     std::vector<Instr> instrs;
     SourceLocation loc;
+    bool is_extern = false;       // A.3.12: внешняя C-функция, тело в C runtime
 };
 
 // Описание struct-типа: имя + упорядоченный список полей (имя, тип-строка).
@@ -204,6 +213,7 @@ std::string operand_str(const Operand& o) {
         case OperandKind::BoolC:  return o.bool_v ? "true" : "false";
         case OperandKind::StringC: return escape_string(o.str_v);
         case OperandKind::CharC:  return std::format("'\\u{{{:x}}}'", o.char_v);
+        case OperandKind::NullC:  return "null";
         case OperandKind::Unit:   return "()";
     }
     return "?";
@@ -315,6 +325,16 @@ void dump_instr(std::ostream& os, const Instr& i) {
             os << "}\n";
             return;
         }
+        case K::AddressOf:
+            os << "    " << dst() << " = &" << operand_str(i.a) << "\n";
+            return;
+        case K::LoadPtr:
+            os << "    " << dst() << " = *" << operand_str(i.a) << "\n";
+            return;
+        case K::StorePtr:
+            os << "    *" << operand_str(i.a) << " = "
+               << operand_str(i.value_to_store) << "\n";
+            return;
     }
 }
 
@@ -465,6 +485,7 @@ void Lowerer::lower_fn(const ast::FnDecl& fn, const std::string& flat_name) {
     Function f;
     f.name = flat_name;
     f.loc = fn.loc;
+    f.is_extern = fn.is_extern;
     f.return_type = ast_type_to_str(*fn.return_type);
     for (const auto& p : fn.params) {
         f.params.push_back(IrParam{p.name, ast_type_to_str(*p.type)});
@@ -473,7 +494,7 @@ void Lowerer::lower_fn(const ast::FnDecl& fn, const std::string& flat_name) {
     current_fn_ = &functions_.back();
     next_temp_ = 0;
     next_label_ = 0;
-    lower_block(*fn.body);
+    if (!fn.is_extern) lower_block(*fn.body);
     current_fn_ = nullptr;
 }
 
@@ -519,6 +540,17 @@ void Lowerer::lower_stmt(const ast::Stmt& s) {
 
 void Lowerer::lower_var_decl(const ast::VarDeclStmt& v) {
     auto rhs = lower_expr(*v.init);
+    // Если RHS — NullC, а декларация указывает конкретный pointer type,
+    // вставим Cast, чтобы IR-тип переменной совпал с заявленным (иначе бэкенд
+    // увидит p:*void и сломается при разыменовании). См. A.2.14.
+    if (rhs.kind == OperandKind::NullC && v.type
+        && dynamic_cast<const ast::PointerType*>(v.type.get())) {
+        auto cast_temp = fresh_temp();
+        Instr c; c.kind = InstrKind::Cast; c.dst = cast_temp; c.has_dst = true;
+        c.a = rhs; c.type_name = ast_type_to_str(*v.type); c.loc = v.loc;
+        emit(std::move(c));
+        rhs = cast_temp;
+    }
     Instr i;
     i.kind = InstrKind::Move;
     i.dst = Operand::var(v.name);
@@ -550,6 +582,14 @@ void Lowerer::lower_assign(const ast::AssignStmt& a) {
         auto idx = lower_expr(*ix->index);
         Instr i; i.kind = InstrKind::StoreIndex;
         i.a = base; i.b = idx; i.value_to_store = rhs; i.loc = a.loc;
+        emit(std::move(i));
+        return;
+    }
+    // *p = rhs (A.2.14): запись через указатель.
+    if (auto* de = dynamic_cast<const ast::DerefExpr*>(a.target.get())) {
+        auto p = lower_expr(*de->operand);
+        Instr i; i.kind = InstrKind::StorePtr;
+        i.a = p; i.value_to_store = rhs; i.loc = a.loc;
         emit(std::move(i));
         return;
     }
@@ -631,6 +671,27 @@ Operand Lowerer::lower_expr(const ast::Expr& e) {
     if (auto* c = dynamic_cast<const ast::CallExpr*>(&e))   return lower_call(*c);
     if (auto* a = dynamic_cast<const ast::ArrayLit*>(&e))   return lower_array_lit(*a);
     if (auto* s = dynamic_cast<const ast::StructLit*>(&e))  return lower_struct_lit(*s);
+    // A.2.14: указатели.
+    if (dynamic_cast<const ast::NullLit*>(&e)) return Operand::null_c();
+    if (auto* ao = dynamic_cast<const ast::AddressOfExpr*>(&e)) {
+        // Семантика гарантирует, что operand — Ident/Field/Index lvalue. Для MVP
+        // поддерживаем &Ident (адрес локальной переменной). Field/Index лоуэрим
+        // через временный alloca (на стороне LLVM).
+        auto src = lower_expr(*ao->operand);
+        auto dst = fresh_temp();
+        Instr i; i.kind = InstrKind::AddressOf; i.dst = dst; i.has_dst = true;
+        i.a = src; i.loc = ao->loc;
+        emit(std::move(i));
+        return dst;
+    }
+    if (auto* de = dynamic_cast<const ast::DerefExpr*>(&e)) {
+        auto p = lower_expr(*de->operand);
+        auto dst = fresh_temp();
+        Instr i; i.kind = InstrKind::LoadPtr; i.dst = dst; i.has_dst = true;
+        i.a = p; i.loc = de->loc;
+        emit(std::move(i));
+        return dst;
+    }
     // unreachable
     return Operand::unit();
 }
@@ -921,6 +982,9 @@ std::string Lowerer::ast_type_to_str(const ast::TypeExpr& te) const {
     if (auto* at = dynamic_cast<const ast::ArrayType*>(&te)) {
         return "[" + ast_type_to_str(*at->element) + "; " + std::to_string(at->size) + "]";
     }
+    if (auto* pt = dynamic_cast<const ast::PointerType*>(&te)) {
+        return "*" + ast_type_to_str(*pt->pointee);
+    }
     return "?";
 }
 
@@ -1087,6 +1151,12 @@ export void fold_constants_in_function(Function& fn) {
         if (ins.kind == InstrKind::StoreField || ins.kind == InstrKind::StoreIndex) {
             if (ins.a.kind == OperandKind::Var) var_mutated.insert(ins.a.str_v);
         }
+        // A.2.14: переменную, у которой взят адрес, нельзя свернуть в константу —
+        // через указатель её значение может меняться или адрес критичен сам по себе.
+        if (ins.kind == InstrKind::AddressOf
+            && ins.a.kind == OperandKind::Var) {
+            var_mutated.insert(ins.a.str_v);
+        }
     }
     std::unordered_map<std::string, Operand> var_const;
     for (const auto& [name, count] : var_assigns) {
@@ -1227,6 +1297,7 @@ export void dce_in_function(Function& fn) {
 
 export void optimize_module(Module& m) {
     for (auto& fn : m.functions) {
+        if (fn.is_extern) continue;  // нечего оптимизировать в extern fn (нет тела)
         // Чередуем fold ↔ DCE до фиксации (или 4 итераций — учебный потолок).
         std::size_t prev = 0, curr = fn.instrs.size();
         for (int pass = 0; pass < 4 && prev != curr; ++pass) {

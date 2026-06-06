@@ -80,7 +80,6 @@ target_sources(herta_core
             src/parser/parser.cppm
             src/semantic/semantic.cppm
             src/ir/ir.cppm
-            src/codegen/interp.cppm
             src/codegen/llvm_emit.cppm
             src/driver/driver.cppm
 )
@@ -99,7 +98,9 @@ target_compile_definitions(myc PRIVATE
     HERTA_RUNTIME_C="${CMAKE_SOURCE_DIR}/src/codegen/runtime.c"
 )
 
-# Convenience targets.
+# ТЗ требует целей `build`, `run`, `debug`, `clean`. CMake/Ninja предоставляют
+# `build` (по умолчанию) и `clean` встроенно; `run` и `debug` определены ниже.
+# Дополнительно `distclean` полностью удаляет каталог сборки.
 add_custom_target(run
     COMMAND $<TARGET_FILE:myc> ${HERTA_RUN_ARGS}
     DEPENDS myc
@@ -109,6 +110,14 @@ add_custom_target(run
 add_custom_target(debug
     COMMAND ${CMAKE_COMMAND} -E echo "Build type: ${CMAKE_BUILD_TYPE}"
     COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR}
+)
+
+add_custom_target(distclean
+    COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_BINARY_DIR}/CMakeFiles
+                                       ${CMAKE_BINARY_DIR}/CMakeCache.txt
+                                       ${CMAKE_BINARY_DIR}/build.ninja
+                                       ${CMAKE_BINARY_DIR}/cmake_install.cmake
+                                       ${CMAKE_BINARY_DIR}/Testing
 )
 
 if(HERTA_BUILD_TESTS)

@@ -1,40 +1,43 @@
-// Пример из спецификации: сортировка пузырьком.
+// Язык — call-by-value, массивы передаются по значению (копируются),
+// поэтому in-place изменение чужой переменной невозможно. Идиоматический
+// способ — вернуть отсортированную копию из функции и переприсвоить её.
 
 module bubble_sort;
 
-namespace Utils {
-    type Index = int32;
+type Index = int32;  // показывает, что type-alias работает (semantics §10)
 
-    fn swap(arr: [int32; 5], i: Index, j: Index) void {
-        var tmp: int32 = arr[i];
-        arr[i] = arr[j];
-        arr[j] = tmp;
-    }
-}
-
-fn bubble_sort(arr: [int32; 5], n: int32) void {
-    var i: int32 = 0;
-    while i < n - 1 {
-        var j: int32 = 0;
-        while j < n - 1 - i {
+fn bubble_sort(arr: [int32; 5]) [int32; 5] {
+    // `arr` — локальная копия (call-by-value); сортируем её и возвращаем.
+    var i: Index = 0;
+    while i < 4 {
+        var j: Index = 0;
+        while j < 4 - i {
             if arr[j] > arr[j + 1] {
-                Utils.swap(arr, j, j + 1);
+                var tmp: int32 = arr[j];
+                arr[j] = arr[j + 1];
+                arr[j + 1] = tmp;
             }
             j = j + 1;
         }
         i = i + 1;
     }
+    return arr;
 }
 
 fn main() int32 {
     var arr: [int32; 5] = [5, 3, 1, 4, 2];
-    bubble_sort(arr, 5);
+    arr = bubble_sort(arr);
 
+    // Должно вывести 1 2 3 4 5 в столбик.
     var k: int32 = 0;
     while k < 5 {
         print(arr[k]);
         k = k + 1;
     }
+
+    // Самопроверка отсортированности.
+    let expected: [int32; 5] = [1, 2, 3, 4, 5];
+    assert(arr == expected);
 
     return 0;
 }

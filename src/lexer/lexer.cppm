@@ -43,6 +43,8 @@ export enum class TokenKind : std::uint8_t {
     KwPub,
     KwTrue,
     KwFalse,
+    KwNull,    // A.2.14: нулевой указатель
+    KwExtern,  // A.3.12: объявление внешней (C) функции
 
     // Арифметика
     Plus, Minus, Star, Slash, Percent,
@@ -52,6 +54,8 @@ export enum class TokenKind : std::uint8_t {
 
     // Логика
     AmpAmp, PipePipe, Bang,
+    // Унарный `&` — address-of (A.2.14). Не используется для bitwise-AND.
+    Amp,
 
     // Присваивание / вывод типа / возвращаемый тип
     Eq, ColonEq, Arrow,
@@ -172,6 +176,8 @@ constexpr KeywordEntry kKeywords[] = {
     {"pub",       TokenKind::KwPub},
     {"true",      TokenKind::KwTrue},
     {"false",     TokenKind::KwFalse},
+    {"null",      TokenKind::KwNull},
+    {"extern",    TokenKind::KwExtern},
 };
 
 TokenKind keyword_lookup(std::string_view text) noexcept {
@@ -210,6 +216,9 @@ std::string_view to_string(TokenKind k) noexcept {
         case TokenKind::KwPub: return "KwPub";
         case TokenKind::KwTrue: return "KwTrue";
         case TokenKind::KwFalse: return "KwFalse";
+        case TokenKind::KwNull: return "KwNull";
+        case TokenKind::KwExtern: return "KwExtern";
+        case TokenKind::Amp: return "Amp";
         case TokenKind::Plus: return "Plus";
         case TokenKind::Minus: return "Minus";
         case TokenKind::Star: return "Star";
@@ -525,8 +534,8 @@ Token Lexer::scan_punct_or_op(herta::common::SourceLocation start,
         // Только двусимвольные — одиночный символ — ошибка.
         case '&':
             if (match('&')) return make_token(TokenKind::AmpAmp, start_pos, start);
-            error("expected '&&', got lone '&'", start);
-            return Token{TokenKind::Invalid, {}, start};
+            // Одиночный `&` — address-of (A.2.14).
+            return make_token(TokenKind::Amp, start_pos, start);
         case '|':
             if (match('|')) return make_token(TokenKind::PipePipe, start_pos, start);
             error("expected '||', got lone '|'", start);

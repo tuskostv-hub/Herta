@@ -9,7 +9,6 @@ import herta.ast;
 import herta.parser;
 import herta.semantic;
 import herta.ir;
-import herta.interp;
 import herta.llvm;
 import herta.driver;
 
@@ -23,7 +22,6 @@ struct CliArgs {
     bool dump_ir = false;
     bool emit_llvm = false;
     bool no_opt = false;
-    bool interp = false;   // путь интерпретации (fallback)
     bool run_after = false; // скомпилировать и сразу запустить
 };
 
@@ -36,7 +34,6 @@ void print_usage(std::ostream& os) {
         "  --dump-ir       print three-address IR and exit\n"
         "  --emit-llvm     emit LLVM IR (.ll) to stdout and exit\n"
         "  --no-opt        disable IR optimizations (constant folding + DCE)\n"
-        "  --interp        interpret directly (fallback backend, no binary)\n"
         "  --run           compile to binary, run it, exit with its code\n";
 }
 
@@ -49,7 +46,6 @@ std::expected<CliArgs, std::string> parse_args(int argc, char** argv) {
         else if (s == "--dump-ir") a.dump_ir = true;
         else if (s == "--emit-llvm") a.emit_llvm = true;
         else if (s == "--no-opt") a.no_opt = true;
-        else if (s == "--interp") a.interp = true;
         else if (s == "--run") a.run_after = true;
         else if (s == "-o") {
             if (i + 1 >= argc) return std::unexpected("missing value for -o");
@@ -134,13 +130,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // --interp: fallback на интерпретатор IR (без бинаря).
-    if (args->interp) {
-        herta::interp::Interpreter interp(std::move(ir_modules));
-        return interp.run();
-    }
-
-    // Дефолт: компиляция в нативный бинарь через LLVM + clang.
+    // Компиляция в нативный бинарь через LLVM + clang.
     herta::llvm_be::Emitter em(std::move(ir_modules));
     auto ll = em.emit();
 
