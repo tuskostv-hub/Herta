@@ -1,39 +1,38 @@
-// Демонстрация фич v1.0: char, binary литералы, assert, len для массивов,
-// сравнение массивов.
+// демонстрация базовых фич: char, литералы, assert, массивы
 
 module v1_features;
 
 fn main() int32 {
-    // char литералы и сравнение
+    // char и его сравнение
     let c: char = 'A';
     assert(c == 'A');
     assert(c != 'B');
 
-    // A.1.2: UTF-8 char литералы (кириллица — 2 байта в UTF-8)
-    let ru: char = 'й';                // U+0439
+    // кириллица в char-литерале (utf-8, 2 байта)
+    let ru: char = 'й';                // код 1081
     assert(int32(ru) == 1081);
-    let emoji_alike: char = 'А';       // U+0410 — кириллическая А, не латинская
+    let emoji_alike: char = 'А';       // кириллическая А, не латинская
     assert(emoji_alike != 'A');
 
-    // char ↔ int конвертация
+    // преобразование char и int в обе стороны
     let code: int32 = int32(c);  // 65
     let back: char = char(code);
     assert(back == 'A');
 
-    // binary / hex / decimal — три формы целочисленных литералов
+    // три формы целочисленных литералов: двоичная, hex, десятичная
     let mask: int32 = 0b101010;
     let bytev: int32 = 0xFF;
     let dec: int32 = 42;
     assert(mask == dec);
     assert(bytev == 255);
 
-    // массив + len + равенство
+    // массив, длина и равенство
     var a: [int32; 5] = [1, 2, 3, 4, 5];
     var b: [int32; 5] = [1, 2, 3, 4, 5];
     assert(len(a) == 5);
     assert(a == b);
 
-    // строки + len
+    // len работает и для строк
     let s: string = "hello";
     assert(len(s) == 5);
 

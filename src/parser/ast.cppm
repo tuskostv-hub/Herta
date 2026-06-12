@@ -1,9 +1,8 @@
-// Module `herta.ast` — абстрактное синтаксическое дерево языка Herta.
-// Покрывает грамматику §3 specs/grammar.md.
+// AST: абстрактное синтаксическое дерево.
 //
-// Узлы AST построены как class hierarchy с виртуальным деструктором
-// и `dump()` для печати через `--dump-ast`. Дети хранятся через
-// std::unique_ptr<T>. Все узлы помнят SourceLocation для диагностики.
+// Узлы — иерархия классов с виртуальным деструктором и dump() для
+// --dump-ast. Дети хранятся через unique_ptr. Каждый узел помнит
+// SourceLocation для диагностики.
 
 export module herta.ast;
 
@@ -13,10 +12,6 @@ import herta.common;
 namespace herta::ast {
 
 using herta::common::SourceLocation;
-
-// ===========================================================================
-// Операторы
-// ===========================================================================
 
 export enum class UnaryOp : std::uint8_t {
     Neg,   // -x
@@ -59,24 +54,18 @@ export std::string_view to_string(BinaryOp op) noexcept {
     return "?";
 }
 
-// ===========================================================================
-// Forward declarations
-// ===========================================================================
-
 export struct Expr;
 export struct Stmt;
 export struct TypeExpr;
 export struct Decl;
 export struct BlockStmt;
 
-// Утилита: печать с отступом.
+// Хелпер для отступов в дампе AST
 inline void indent(std::ostream& os, int level) {
     for (int i = 0; i < level; ++i) os << "  ";
 }
 
-// ===========================================================================
-// TypeExpr — выражение типа (§3.5 grammar.md)
-// ===========================================================================
+// TypeExpr — выражение типа
 
 export struct TypeExpr {
     SourceLocation loc;
@@ -84,7 +73,7 @@ export struct TypeExpr {
     virtual void dump(std::ostream& os, int level) const = 0;
 };
 
-// `int32`, `Point`, `Meters` — простое имя типа.
+// Простое имя типа: int32, Point, Meters и т.п.
 export struct NamedType : TypeExpr {
     std::string name;
 
@@ -94,7 +83,7 @@ export struct NamedType : TypeExpr {
     }
 };
 
-// `[T; N]` — массив фиксированного размера.
+// Массив фиксированного размера [T; N]
 export struct ArrayType : TypeExpr {
     std::unique_ptr<TypeExpr> element;
     std::int64_t size = 0;
@@ -106,7 +95,7 @@ export struct ArrayType : TypeExpr {
     }
 };
 
-// `*T` — указатель на T (A.2.14). T может быть `void` (raw pointer, A.3.7).
+// Указатель *T. В роли T может быть void — тогда это сырой указатель.
 export struct PointerType : TypeExpr {
     std::unique_ptr<TypeExpr> pointee;
 
@@ -117,7 +106,7 @@ export struct PointerType : TypeExpr {
     }
 };
 
-// `fn(T1, T2) R` — указатель на функцию (A.3.7).
+// Указатель на функцию: fn(T1, T2) R
 export struct FnPointerType : TypeExpr {
     std::vector<std::unique_ptr<TypeExpr>> params;
     std::unique_ptr<TypeExpr> return_type;
@@ -131,9 +120,7 @@ export struct FnPointerType : TypeExpr {
     }
 };
 
-// ===========================================================================
-// Expr — выражения (§3.4 grammar.md)
-// ===========================================================================
+// Expr — выражения
 
 export struct Expr {
     SourceLocation loc;
@@ -143,7 +130,7 @@ export struct Expr {
 
 export struct IntLit : Expr {
     std::int64_t value = 0;
-    std::string lexeme;  // оригинальное представление (для диагностики)
+    std::string lexeme;  // как было написано в исходнике (для диагностики)
 
     void dump(std::ostream& os, int level) const override {
         indent(os, level);
@@ -170,8 +157,8 @@ export struct BoolLit : Expr {
 };
 
 export struct StringLit : Expr {
-    std::string value;   // уже с раскрытыми escape
-    std::string lexeme;  // оригинальный лексический literal с кавычками
+    std::string value;   // escape-последовательности уже раскрыты
+    std::string lexeme;  // исходный текст с кавычками
 
     void dump(std::ostream& os, int level) const override {
         indent(os, level);
@@ -180,7 +167,7 @@ export struct StringLit : Expr {
 };
 
 export struct CharLit : Expr {
-    std::uint32_t value = 0;  // Unicode code point (8-битный ASCII укладывается)
+    std::uint32_t value = 0;  // unicode code point (ASCII укладывается в 8 бит)
     std::string lexeme;
 
     void dump(std::ostream& os, int level) const override {
@@ -189,7 +176,7 @@ export struct CharLit : Expr {
     }
 };
 
-// `null` — нулевой указатель (A.2.14). Тип присваивается семантикой из контекста.
+// Литерал null. Конкретный тип решает семантика по контексту.
 export struct NullLit : Expr {
     void dump(std::ostream& os, int level) const override {
         indent(os, level);
@@ -197,7 +184,7 @@ export struct NullLit : Expr {
     }
 };
 
-// `&expr` — взятие адреса. operand обязан быть lvalue (Ident/Field/Index/Deref).
+// Взятие адреса &expr. operand должен быть lvalue (Ident/Field/Index/Deref).
 export struct AddressOfExpr : Expr {
     std::unique_ptr<Expr> operand;
 
@@ -208,7 +195,7 @@ export struct AddressOfExpr : Expr {
     }
 };
 
-// `*expr` — разыменование. Является lvalue (можно `*p = …`).
+// Разыменование *expr. Это lvalue, так что *p = ... разрешено.
 export struct DerefExpr : Expr {
     std::unique_ptr<Expr> operand;
 
@@ -283,8 +270,8 @@ export struct BinaryExpr : Expr {
     }
 };
 
-// `obj.field` или доступ к элементу неймспейса/модуля.
-// Семантика разбирает: namespace-access / field-access / method-ref.
+// obj.field, либо доступ к элементу namespace/модуля. Семантика
+// разруливает, что именно — поле, namespace-access или ссылка на метод.
 export struct FieldExpr : Expr {
     std::unique_ptr<Expr> base;
     std::string field;
@@ -296,7 +283,7 @@ export struct FieldExpr : Expr {
     }
 };
 
-// `arr[i]` — индексирование.
+// Индексирование arr[i]
 export struct IndexExpr : Expr {
     std::unique_ptr<Expr> base;
     std::unique_ptr<Expr> index;
@@ -309,8 +296,8 @@ export struct IndexExpr : Expr {
     }
 };
 
-// `f(a, b)` — вызов функции, метода, либо cast (T(x)).
-// Различение делает семантика по типу callee.
+// Вызов f(a, b): функция, метод или каст T(x). Что именно — решает
+// семантика по типу callee.
 export struct CallExpr : Expr {
     std::unique_ptr<Expr> callee;
     std::vector<std::unique_ptr<Expr>> args;
@@ -323,9 +310,7 @@ export struct CallExpr : Expr {
     }
 };
 
-// ===========================================================================
-// Stmt — инструкции (§3.3 grammar.md)
-// ===========================================================================
+// Stmt — инструкции
 
 export struct Stmt {
     SourceLocation loc;
@@ -333,12 +318,13 @@ export struct Stmt {
     virtual void dump(std::ostream& os, int level) const = 0;
 };
 
-// `let x: T = expr;` или `var x: T = expr;`. Тип опционален (вывод через `:=`).
+// let x: T = expr; или var x: T = expr;. Тип можно опустить — будет
+// выведен (через :=).
 export struct VarDeclStmt : Stmt {
-    bool is_mutable = false;                // true → var, false → let
+    bool is_mutable = false;                // true для var, false для let
     std::string name;
-    std::unique_ptr<TypeExpr> type;         // nullptr → вывод типа
-    std::unique_ptr<Expr> init;             // всегда есть (по семантике §4)
+    std::unique_ptr<TypeExpr> type;         // nullptr означает вывод типа
+    std::unique_ptr<Expr> init;             // инициализатор обязателен
 
     void dump(std::ostream& os, int level) const override {
         indent(os, level);
@@ -350,7 +336,7 @@ export struct VarDeclStmt : Stmt {
     }
 };
 
-// `lvalue = expr;`
+// Присваивание lvalue = expr;
 export struct AssignStmt : Stmt {
     std::unique_ptr<Expr> target;  // Ident / Field / Index
     std::unique_ptr<Expr> value;
@@ -363,9 +349,9 @@ export struct AssignStmt : Stmt {
     }
 };
 
-// `return [expr];`
+// return [expr];
 export struct ReturnStmt : Stmt {
-    std::unique_ptr<Expr> value;  // nullptr для return; в void
+    std::unique_ptr<Expr> value;  // nullptr — это return; в void-функции
 
     void dump(std::ostream& os, int level) const override {
         indent(os, level);
@@ -374,16 +360,16 @@ export struct ReturnStmt : Stmt {
     }
 };
 
-// `if cond { ... } [else block-or-if]`
+// if cond { ... } [else блок-или-if]
 export struct IfStmt : Stmt {
     std::unique_ptr<Expr> cond;
     std::unique_ptr<BlockStmt> then_branch;
-    std::unique_ptr<Stmt> else_branch;  // BlockStmt или IfStmt; nullptr — без else
+    std::unique_ptr<Stmt> else_branch;  // BlockStmt либо IfStmt, nullptr если else нет
 
     void dump(std::ostream& os, int level) const override;
 };
 
-// `while cond { ... }`
+// while cond { ... }
 export struct WhileStmt : Stmt {
     std::unique_ptr<Expr> cond;
     std::unique_ptr<BlockStmt> body;
@@ -454,9 +440,7 @@ inline void WhileStmt::dump(std::ostream& os, int level) const {
     body->dump(os, level + 2);
 }
 
-// ===========================================================================
-// Decl — объявления верхнего уровня (§3.2 grammar.md)
-// ===========================================================================
+// Decl — объявления верхнего уровня
 
 export struct Decl {
     bool is_pub = false;
@@ -475,8 +459,8 @@ export struct FnDecl : Decl {
     std::string name;
     std::vector<Param> params;
     std::unique_ptr<TypeExpr> return_type;
-    std::unique_ptr<BlockStmt> body;  // nullptr для extern fn (A.3.12)
-    bool is_extern = false;            // extern fn: только сигнатура, тело отсутствует
+    std::unique_ptr<BlockStmt> body;  // nullptr у extern-функций
+    bool is_extern = false;            // у extern fn есть только сигнатура
 
     void dump(std::ostream& os, int level) const override {
         indent(os, level);
@@ -537,8 +521,7 @@ export struct NamespaceDecl : Decl {
     }
 };
 
-// Внутри impl-блока: метод = (флаг pub, FnDecl).
-// `is_pub` хранится на самом FnDecl.
+// impl-блок. Метод — это FnDecl с собственным флагом is_pub.
 export struct ImplDecl : Decl {
     std::string type_name;
     std::vector<std::unique_ptr<FnDecl>> methods;
@@ -550,9 +533,7 @@ export struct ImplDecl : Decl {
     }
 };
 
-// ===========================================================================
 // Program — корневой узел AST
-// ===========================================================================
 
 export struct Program {
     std::string module_name;

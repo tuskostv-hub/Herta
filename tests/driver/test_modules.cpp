@@ -1,5 +1,5 @@
-// Тесты multi-module компиляции (A.2.13 + A.3.6).
-// Создают временные .herta-файлы и прогоняют через Driver.
+// Тесты multi-module компиляции. Создают временные .herta-файлы и
+// прогоняют их через Driver.
 
 import std;
 import herta.common;
@@ -50,7 +50,6 @@ void err(const std::filesystem::path& root, std::string_view test) {
 int main() {
     TempDir tmp;
 
-    // -------- базовый случай: 2 модуля --------
     {
         write_file(tmp.path / "Math.herta", R"(
             module Math;
@@ -64,7 +63,6 @@ int main() {
         ok(tmp.path / "main_ok.herta", "basic two-module");
     }
 
-    // -------- pub фильтрация: вызов приватной фн отклоняется --------
     {
         write_file(tmp.path / "Lib.herta", R"(
             module Lib;
@@ -85,7 +83,6 @@ int main() {
         err(tmp.path / "main_priv.herta", "private fn not accessible");
     }
 
-    // -------- pub struct + методы --------
     {
         write_file(tmp.path / "Geom.herta", R"(
             module Geom;
@@ -111,7 +108,6 @@ int main() {
         err(tmp.path / "main_geom.herta", "qualified type name not supported");
     }
 
-    // -------- циклический import --------
     {
         write_file(tmp.path / "A.herta", R"(
             module A;
@@ -126,7 +122,6 @@ int main() {
         err(tmp.path / "A.herta", "circular import");
     }
 
-    // -------- import несуществующего модуля --------
     {
         write_file(tmp.path / "main_nx.herta", R"(
             module main_nx;
@@ -136,7 +131,6 @@ int main() {
         err(tmp.path / "main_nx.herta", "missing module");
     }
 
-    // -------- module Name != file name --------
     {
         write_file(tmp.path / "wrong_name.herta", R"(
             module Different;
@@ -145,7 +139,6 @@ int main() {
         err(tmp.path / "wrong_name.herta", "module name mismatch");
     }
 
-    // -------- transitive import (A → B, B → C) --------
     {
         write_file(tmp.path / "Cdep.herta", R"(
             module Cdep;

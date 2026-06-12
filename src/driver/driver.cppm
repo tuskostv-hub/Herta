@@ -1,10 +1,8 @@
-// Module `herta.driver` — оркестратор компилятора.
-// Реализует A.2.13 (модули) и A.3.6 (полноценный контроль видимости через pub):
-//   * принимает корневой .herta-файл,
-//   * рекурсивно загружает import-зависимости (поиск Name.herta в одном каталоге),
-//   * детектирует циклы и несовпадения module Name; ↔ имени файла,
-//   * пропускает модули через lexer + parser + semantic в топологическом порядке,
-//   * передаёт scope-ы между анализаторами для cross-module name resolution.
+// Driver склеивает все фазы компилятора. Берёт корневой .herta файл,
+// рекурсивно подтягивает импорты (Name.herta из той же папки), ловит
+// циклы и расхождения между module Name; и именем файла. Гонит модули
+// через лексер, парсер и семантику в топологическом порядке, попутно
+// прокидывая scope-ы для разрешения имён между модулями.
 
 export module herta.driver;
 
@@ -25,30 +23,30 @@ namespace ast = herta::ast;
 struct LoadedModule {
     std::string name;
     std::filesystem::path path;
-    std::shared_ptr<SourceFile> source;       // лексеру/парсеру нужно время жизни
-    std::vector<herta::lexer::Token> tokens;  // string_view'ы смотрят в source
+    std::shared_ptr<SourceFile> source;       // лексер и парсер ссылаются сюда
+    std::vector<herta::lexer::Token> tokens;  // string_view-ы смотрят в source
     std::unique_ptr<ast::Program> program;
-    std::unique_ptr<herta::semantic::SemanticAnalyzer> sema;  // живёт до конца Driver'а
+    std::unique_ptr<herta::semantic::SemanticAnalyzer> sema;  // живёт пока жив Driver
 };
 
 export class Driver {
 public:
     Driver(DiagnosticSink& sink) : sink_(sink) {}
 
-    // Компилирует программу: lex+parse всех модулей, потом semantic
-    // в порядке зависимостей. Возвращает true при успехе.
+    // Прогоняет программу: lex и parse всех модулей, потом семантика
+    // в порядке зависимостей. true при успехе.
     bool compile(const std::filesystem::path& root_file);
 
-    // Управление оптимизациями (B.2.2 — constant folding + DCE).
-    // По умолчанию включены; CLI флаг --no-opt → set_optimize(false).
+    // Управление оптимизациями IR (constant folding и DCE).
+    // По умолчанию включены, флаг --no-opt их отключает.
     void set_optimize(bool on) noexcept { optimize_ = on; }
 
-    // Выводит IR для всех скомпилированных модулей в топологическом порядке.
-    // Вызывать только после успешного compile().
+    // Печатает IR всех модулей в топологическом порядке.
+    // Звать после успешного compile().
     void dump_ir(std::ostream& os) const;
 
-    // Лоуэрит все модули в IR (с оптимизациями, если включены) и возвращает
-    // их в топологическом порядке. Вызывать только после успешного compile().
+    // Лоуэрит все модули в IR (с оптимизациями, если они включены) и
+    // возвращает их в топологическом порядке. Звать после compile().
     std::vector<herta::ir::Module> lower_all() const;
 
 private:
@@ -57,11 +55,11 @@ private:
     DiagnosticSink& sink_;
     bool optimize_ = true;
     std::filesystem::path search_dir_;
-    // Топологический порядок: модули, которые ни от кого не зависят, идут первыми.
+    // Топологический порядок: листья дерева зависимостей идут первыми.
     std::vector<std::unique_ptr<LoadedModule>> modules_;
-    // Цвета для DFS: 0=white, 1=gray (in-progress), 2=black (done).
+    // Цвета для DFS: 0 — не тронут, 1 — в процессе, 2 — обработан.
     std::unordered_map<std::string, int> colors_;
-    // По имени модуля → индекс в modules_.
+    // Имя модуля → его индекс в modules_.
     std::unordered_map<std::string, std::size_t> by_name_;
 };
 
@@ -70,19 +68,19 @@ bool Driver::compile(const std::filesystem::path& root_file) {
     search_dir_ = root_abs.parent_path();
     if (!load_recursive(root_abs)) return false;
 
-    // Семантика — в том же топологическом порядке.
-    // Накапливаем scope каждого обработанного модуля для зависящих модулей.
+    // Семантика идёт в том же топологическом порядке.
+    // Scope каждого готового модуля копится, чтобы зависящие могли им пользоваться.
     std::unordered_map<std::string, std::shared_ptr<herta::semantic::Scope>> exports;
 
     for (std::size_t i = 0; i < modules_.size(); ++i) {
         const auto& mod = *modules_[i];
 
-        // Подготовить карту импортов для этого модуля.
+        // Собираем карту импортов для текущего модуля.
         std::unordered_map<std::string, std::shared_ptr<herta::semantic::Scope>> imports;
         for (const auto& imp : mod.program->imports) {
             auto it = exports.find(imp);
             if (it == exports.end()) {
-                // Не должно произойти: load_recursive обеспечил топологический порядок.
+                // Сюда нормально не попадаем: топологический порядок гарантирован load_recursive.
                 sink_.report(herta::common::Diagnostic{
                     .file = mod.path.string(),
                     .loc = mod.program->module_loc,
@@ -93,7 +91,7 @@ bool Driver::compile(const std::filesystem::path& root_file) {
             imports[imp] = it->second;
         }
 
-        // require_main только для корневого модуля (последний в порядке).
+        // require_main применяется только к корневому модулю (он идёт последним).
         bool is_root = (i + 1 == modules_.size());
         auto sema = std::make_unique<herta::semantic::SemanticAnalyzer>(
             *mod.program, mod.path.string(), sink_,
@@ -149,7 +147,7 @@ bool Driver::load_recursive(const std::filesystem::path& path) {
     auto prog = std::make_unique<ast::Program>(std::move(*prog_res));
     auto module_name = prog->module_name;
 
-    // Имя файла должно совпадать с module Name; (semantics.md §13.1).
+    // Имя файла должно совпадать с module Name; в заголовке.
     auto stem = path.stem().string();
     if (module_name != stem) {
         sink_.report(herta::common::Diagnostic{
@@ -161,7 +159,7 @@ bool Driver::load_recursive(const std::filesystem::path& path) {
         return false;
     }
 
-    // Цикл?
+    // Проверка на цикл импортов
     auto cit = colors_.find(module_name);
     if (cit != colors_.end()) {
         if (cit->second == 1) {
@@ -171,12 +169,12 @@ bool Driver::load_recursive(const std::filesystem::path& path) {
             });
             return false;
         }
-        // 2 (black) — уже обработан, не перезагружаем.
+        // Цвет 2 значит «уже обработан», перезагружать не нужно.
         return true;
     }
-    colors_[module_name] = 1;  // gray
+    colors_[module_name] = 1;  // помечаем как in-progress
 
-    // Загрузить зависимости рекурсивно.
+    // Рекурсивно тянем зависимости.
     for (const auto& imp : prog->imports) {
         if (imp == module_name) {
             sink_.report(herta::common::Diagnostic{
@@ -197,7 +195,7 @@ bool Driver::load_recursive(const std::filesystem::path& path) {
         if (!load_recursive(dep_path)) return false;
     }
 
-    // Push в топологический порядок (после зависимостей).
+    // Добавляем в список — уже после всех зависимостей, как и положено.
     auto mod = std::make_unique<LoadedModule>();
     mod->name = module_name;
     mod->path = path;

@@ -64,13 +64,11 @@ void err(std::string_view source, std::string_view test) { run(source, false, te
 }  // namespace
 
 int main() {
-    // ---------------- Базовые программы ----------------
     ok("module m; fn main() int32 { return 0; }", "minimal");
     ok("module m; fn main() int32 { let x: int32 = 5; return x; }", "let typed");
     ok("module m; fn main() int32 { var x := 5; return x; }", "var inferred");
     ok("module m; fn main() void { return; }", "void return");
 
-    // ---------------- Литеральный narrowing ----------------
     ok("module m; fn f() int8 { return 42; }",   "lit fits int8");
     err("module m; fn f() int8 { return 200; }", "lit doesn't fit int8");
     ok("module m; fn f() int8 { return -128; }", "lit -128 fits int8");
@@ -79,13 +77,11 @@ int main() {
     err("module m; fn f() uint8 { return -1; }",  "lit negative for uint");
     ok("module m; fn f() float32 { return 3.14; }", "float lit to float32");
 
-    // ---------------- Mutability ----------------
     ok("module m; fn f() int32 { var x: int32 = 0; x = 5; return x; }",
        "var assign ok");
     err("module m; fn f() int32 { let x: int32 = 0; x = 5; return x; }",
         "let assign error");
 
-    // ---------------- Scope / shadowing ----------------
     ok("module m; fn f() int32 { var x: int32 = 1; { var x: int32 = 2; } return x; }",
        "shadow ok");
     err("module m; fn f() int32 { var x: int32 = 1; var x: int32 = 2; return x; }",
@@ -94,7 +90,6 @@ int main() {
     err("module m; fn f() int32 { let y: int32 = y; return y; }",
         "use before decl in same statement");  // y не виден в init самого себя
 
-    // ---------------- Type rules: widening ----------------
     ok("module m; fn f() int64 { let a: int32 = 1; return a; }",
        "int32 → int64 widening");
     err("module m; fn f() int8 { let a: int32 = 1; return a; }",
@@ -104,7 +99,6 @@ int main() {
     err("module m; fn f() int32 { let a: float64 = 1.0; return a; }",
         "float→int not implicit");
 
-    // ---------------- Binary ops ----------------
     ok("module m; fn f() int64 { let a: int32 = 1; let b: int64 = 2; return a + b; }",
        "int32 + int64");
     err("module m; fn f() int32 { let a: int32 = 1; let b: uint32 = 2; return a + b; }",
@@ -116,19 +110,16 @@ int main() {
     err("module m; fn f() int32 { return 1 % 1.5; }", "% on float");
     ok("module m; fn f() int32 { return 7 / 2; }", "int division");
 
-    // ---------------- Unary ----------------
     ok("module m; fn f() bool { return !true; }",  "!bool");
     err("module m; fn f() bool { return !1; }",     "!non-bool");
     ok("module m; fn f() int32 { return -5; }",     "unary - on int");
     err("module m; fn f() bool { return -true; }",  "unary - on bool");
 
-    // ---------------- Casts ----------------
     ok("module m; fn f() int8 { return int8(200); }",     "cast int→int");
     ok("module m; fn f() int32 { return int32(3.14); }",  "cast float→int");
     err("module m; fn f() int32 { return int32(true); }",  "cast bool→int error");
     err("module m; fn f() string { return string(5); }",   "cast num→string error");
 
-    // ---------------- Control flow ----------------
     ok("module m; fn f() int32 { if true { return 1; } return 0; }", "if true");
     err("module m; fn f() int32 { if 5 { return 1; } return 0; }",   "if non-bool");
     ok("module m; fn f() void { while false { break; } }",            "break in loop");
@@ -139,7 +130,6 @@ int main() {
     err("module m; fn f() int32 { return; }",       "missing value in return");
     err("module m; fn f() void { return 0; }",       "value in void return");
 
-    // ---------------- Structs ----------------
     ok(R"(
         module m;
         struct P { x: int32, y: int32, }
@@ -161,7 +151,6 @@ int main() {
         fn f() int32 { let p: P = P { x: 1 }; return p.y; }
     )", "struct no such field");
 
-    // ---------------- Arrays ----------------
     ok(R"(
         module m;
         fn f() int32 {
@@ -191,7 +180,6 @@ int main() {
         }
     )", "index by float");
 
-    // ---------------- Functions and calls ----------------
     ok(R"(
         module m;
         fn add(a: int32, b: int32) int32 { return a + b; }
@@ -208,7 +196,6 @@ int main() {
         fn main() int32 { return add(1, true); }
     )", "wrong arg type");
 
-    // ---------------- Namespaces ----------------
     ok(R"(
         module m;
         namespace N {
@@ -222,7 +209,6 @@ int main() {
         fn main() int32 { return N.g(); }
     )", "namespace no member");
 
-    // ---------------- Type alias ----------------
     ok(R"(
         module m;
         type Meters = int32;
@@ -234,7 +220,6 @@ int main() {
         fn f() int32 { let m: Meters = 5; return m; }
     )", "alias compatible with target");
 
-    // ---------------- Builtins ----------------
     ok("module m; fn f() void { print(42); }", "print int");
     ok("module m; fn f() void { print(\"hi\"); }", "print string");
     err("module m; fn f() void { print(42, 43); }", "print wrong arg count");
@@ -244,7 +229,6 @@ int main() {
     err("module m; fn f() void { panic(5); }", "panic wrong arg type");
     ok("module m; fn f() int32 { return len(\"abc\"); }", "len");
 
-    // ---------------- A.2.3: impl методы ----------------
     ok(R"(
         module m;
         struct P { x: int32, }
@@ -312,7 +296,6 @@ int main() {
         impl P { fn a(self: P) int32 { return 0; } }
     )", "duplicate method across impl blocks");
 
-    // ---------------- v1.0: char ----------------
     ok("module m; fn f() char { return 'a'; }", "char literal");
     ok("module m; fn f() char { return '\\n'; }", "char escape");
     ok("module m; fn f() bool { return 'a' == 'b'; }", "char eq");
@@ -324,18 +307,15 @@ int main() {
     err("module m; fn f() string { return string('a'); }", "cast char→string error");
     ok("module m; fn f() void { print('a'); }", "print char");
 
-    // ---------------- v1.0: binary literals ----------------
     ok("module m; fn f() int32 { return 0b101010; }",  "binary literal");
     ok("module m; fn f() uint8 { return 0b11111111; }", "binary fits uint8");
     err("module m; fn f() int32 { return 0b; }", "empty binary literal");
 
-    // ---------------- v1.0: assert ----------------
     ok("module m; fn f() void { assert(true); }",  "assert bool");
     ok("module m; fn f() void { assert(1 == 1); }", "assert comparison");
     err("module m; fn f() void { assert(1); }",     "assert non-bool");
     err("module m; fn f() void { assert(); }",      "assert no args");
 
-    // ---------------- v1.0: len for arrays ----------------
     ok(R"(
         module m;
         fn f() int32 {
@@ -346,7 +326,6 @@ int main() {
     ok("module m; fn f() int32 { return len(\"hello\"); }", "len of string");
     err("module m; fn f() int32 { return len(42); }", "len of int error");
 
-    // ---------------- v1.0: array equality ----------------
     ok(R"(
         module m;
         fn f() bool {
@@ -364,7 +343,6 @@ int main() {
         }
     )", "array == different sizes");
 
-    // ---------------- v1.0: chained lvalue mutability ----------------
     ok(R"(
         module m;
         struct P { x: int32, }
@@ -392,7 +370,6 @@ int main() {
         }
     )", "let array element immutable (chain)");
 
-    // ---------------- bubble_sort через namespace + arrays ----------------
     ok(R"(
         module m;
         namespace Utils {

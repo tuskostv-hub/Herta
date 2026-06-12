@@ -22,7 +22,7 @@ struct CliArgs {
     bool dump_ir = false;
     bool emit_llvm = false;
     bool no_opt = false;
-    bool run_after = false; // скомпилировать и сразу запустить
+    bool run_after = false; // собрать бинарь и сразу запустить его
 };
 
 void print_usage(std::ostream& os) {
@@ -61,7 +61,7 @@ std::expected<CliArgs, std::string> parse_args(int argc, char** argv) {
     return a;
 }
 
-// Запускает clang для сборки .ll + runtime.c в исполняемый файл.
+// Зовёт clang для сборки .ll + runtime.c в исполняемый файл.
 // Возвращает 0 при успехе.
 int link_binary(const std::string& ll_path, const std::string& out_path) {
     auto cmd = std::format(
@@ -95,7 +95,7 @@ int main(int argc, char** argv) {
 
     herta::common::DiagnosticSink sink;
 
-    // --dump-tokens / --dump-ast — корневой файл без подгрузки импортов.
+    // --dump-tokens и --dump-ast работают по одному корневому файлу без импортов
     if (args->dump_tokens || args->dump_ast) {
         auto src = herta::common::SourceFile::load(args->input);
         if (!src) { std::cerr << "error: " << src.error() << '\n'; return 1; }
@@ -113,7 +113,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // Полный pipeline через driver.
+    // Полный pipeline проходит через driver
     herta::driver::Driver driver(sink);
     driver.set_optimize(!args->no_opt);
     if (!driver.compile(args->input) || sink.has_errors()) {
@@ -130,11 +130,11 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // Компиляция в нативный бинарь через LLVM + clang.
+    // Сборка нативного бинаря через LLVM IR и clang
     herta::llvm_be::Emitter em(std::move(ir_modules));
     auto ll = em.emit();
 
-    // Записать .ll во временный файл рядом с выходным бинарём.
+    // Пишем .ll во временный файл, дальше его подберёт clang
     namespace fs = std::filesystem;
     fs::path out_path = args->output.empty()
         ? fs::path(args->input).stem()

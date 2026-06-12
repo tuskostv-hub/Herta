@@ -1,8 +1,4 @@
-// Module `herta.semantic` — семантический анализатор языка Herta.
-// Покрывает specs/semantics.md и specs/types.md.
-//
-// v1: НЕ реализованы impl-методы и межмодульная сборка (`import`).
-// `import`-декларации пропускаются с warning'ом.
+// Семантика: проверка типов, областей видимости, мутабельности.
 
 export module herta.semantic;
 
@@ -17,16 +13,12 @@ using herta::common::DiagnosticSink;
 using herta::common::SourceLocation;
 namespace ast = herta::ast;
 
-// ===========================================================================
-// Type system
-// ===========================================================================
-
 export enum class Primitive : std::uint8_t {
     I8, I16, I32, I64,
     U8, U16, U32, U64,
     F32, F64,
     Bool, String, Char, Void,
-    Byte,  // A.3.7: 1-байтный raw-тип, не арифметический
+    Byte,  // 1-байтный raw-тип, не арифметический
 };
 
 export struct ArrayTy;
@@ -106,8 +98,8 @@ struct StructTy {
 
 struct PointerTy {
     Type pointee;
-    // is_raw: указатель «без типа» (`*void` / `*byte` рассматриваются как сырые),
-    // приводится к любому другому указателю без явного cast'а (A.3.7).
+    // is_raw — указатель без конкретного типа (*void и *byte).
+    // Свободно приводится к любому другому указателю без явного каста.
     bool is_raw = false;
 };
 
@@ -188,7 +180,7 @@ constexpr int int_width(Primitive p) noexcept {
     }
 }
 
-// Implicit widening (types.md §5.4).
+// Неявное расширение числовых типов
 bool can_widen_prim(Primitive from, Primitive to) noexcept {
     if (from == to) return true;
     if (is_signed_int(from) && is_signed_int(to))
@@ -207,28 +199,28 @@ bool can_implicit_convert(const Type& from, const Type& to) noexcept {
     if (from.same_as(to)) return true;
     if (from.is_primitive() && to.is_primitive())
         return can_widen_prim(from.prim(), to.prim());
-    // Указатели (A.2.14/A.3.7): null → любой *T; raw pointer (*void/*byte) ↔ типизированный.
+    // Указатели: null приводится к любому *T, сырой указатель — к типизированному и обратно.
     if (from.is_pointer() && to.is_pointer()) {
         if (from.pointer().is_raw || to.pointer().is_raw) return true;
         return from.pointer().pointee.same_as(to.pointer().pointee);
     }
-    // A.3.12: `string` → raw pointer (для границы с C). Конверсия в .data.
+    // string → raw pointer (нужно на границе с C). На уровне рантайма это просто .data из строки.
     if (from.is_string() && to.is_pointer() && to.pointer().is_raw) return true;
     return false;
 }
 
-// Explicit cast (types.md §5.1/5.2).
+// Явное приведение типов T(x)
 bool can_explicit_cast(const Type& from, const Type& to) noexcept {
     if (from.same_as(to)) return true;
-    // Указатели → указатели: любой → любой (A.3.7).
+    // Любой указатель в любой указатель — разрешено
     if (from.is_pointer() && to.is_pointer()) return true;
     if (!from.is_primitive() || !to.is_primitive()) return false;
     auto a = from.prim(), b = to.prim();
     if (a == Primitive::Bool || b == Primitive::Bool) return false;
     if (a == Primitive::String || b == Primitive::String) return false;
     if (a == Primitive::Void || b == Primitive::Void) return false;
-    if (a == Primitive::Byte || b == Primitive::Byte) return false;  // byte — non-arithmetic
-    // char ↔ int/uint — получение/установка числового кода (spec §2.7).
+    if (a == Primitive::Byte || b == Primitive::Byte) return false;  // byte не арифметический
+    // char ↔ int/uint — это получение/установка числового кода символа.
     if (a == Primitive::Char && is_int(b)) return true;
     if (is_int(a) && b == Primitive::Char) return true;
     if (a == Primitive::Char || b == Primitive::Char) return false;
@@ -263,10 +255,6 @@ bool int_fits(std::int64_t v, Primitive target) noexcept {
 
 }  // anonymous
 
-// ===========================================================================
-// Symbol / Scope
-// ===========================================================================
-
 export class Scope;  // forward — full definition ниже.
 
 export struct Symbol {
@@ -278,19 +266,19 @@ export struct Symbol {
     Type type;
     bool is_mutable = false;
     bool is_pub = false;
-    bool is_extern = false;  // A.3.12: внешняя C-функция, нет тела
+    bool is_extern = false;  // внешняя C-функция, тела нет
     std::vector<Type> param_types;
     std::shared_ptr<Scope> ns_scope;  // Namespace / Module
 };
 
-// Метод impl-блока: хранится в side-table SemanticAnalyzer::methods_,
-// привязанной к идентичности StructTy (shared_ptr).
+// Метод из impl-блока. Лежит в side-table SemanticAnalyzer::methods_,
+// привязанной к идентичности StructTy через shared_ptr.
 export struct MethodInfo {
     std::string name;
     std::vector<Type> param_types;
     std::vector<std::string> param_names;
     Type return_type;
-    bool is_static = false;  // true: первый параметр — не self
+    bool is_static = false;  // true — первый параметр не self
     bool is_pub = false;
     SourceLocation loc;
     const ast::FnDecl* ast_node = nullptr;
@@ -324,16 +312,12 @@ private:
     std::unordered_map<std::string, Symbol> entries_;
 };
 
-// ===========================================================================
-// SemanticAnalyzer
-// ===========================================================================
-
 export class SemanticAnalyzer {
 public:
-    // require_main=true для компиляции точки входа; false — для unit-тестов
-    // фрагментов, в которых нет fn main().
-    // imports — мап «имя импортированного модуля → его публичный scope»
-    // (см. A.2.13 / A.3.6: pub-фильтрация на стороне получателя в check).
+    // require_main=true нужен для компиляции точки входа; false — для unit-тестов
+    // фрагментов, в которых fn main() нет.
+    // imports — карта "имя импортированного модуля → его публичный scope".
+    // Pub-фильтрация делается на стороне получателя.
     SemanticAnalyzer(const ast::Program& prog,
                      std::string_view filename,
                      DiagnosticSink& sink,
@@ -342,8 +326,8 @@ public:
 
     bool analyze();
 
-    // После успешного analyze() — глобальный scope этого модуля (для
-    // потребителей через import; запрос помечен pub-фильтрацией при доступе).
+    // После успешного analyze() — глобальный scope этого модуля. Им
+    // пользуются модули, которые его импортируют (с фильтрацией по pub).
     std::shared_ptr<Scope> module_scope() const { return shared_scope_; }
 
     // Side-table: тип каждого выражения после проверки. Заполняется в
@@ -366,7 +350,6 @@ public:
     }
 
 private:
-    // --- top-level ---
     bool process_decls(const std::vector<std::unique_ptr<ast::Decl>>& decls,
                        Scope& target);
     bool process_struct(const ast::StructDecl&, Scope&);
@@ -377,10 +360,8 @@ private:
     bool process_impl_signatures(const ast::ImplDecl&, Scope&);
     bool process_impl_bodies(const ast::ImplDecl&, Scope&);
 
-    // --- type resolution ---
     std::optional<Type> resolve_type(const ast::TypeExpr&, Scope&);
 
-    // --- statements ---
     bool check_block(const ast::BlockStmt&, Scope& parent);
     bool check_stmt(const ast::Stmt&, Scope&);
     bool check_var_decl(const ast::VarDeclStmt&, Scope&);
@@ -389,7 +370,6 @@ private:
     bool check_if(const ast::IfStmt&, Scope&);
     bool check_while(const ast::WhileStmt&, Scope&);
 
-    // --- expressions ---
     std::optional<Type> check_expr(const ast::Expr&, Scope&);
     // Версия с ожидаемым контекстом — для адаптации литералов и финальной
     // проверки конвертируемости.
@@ -405,12 +385,10 @@ private:
 
     bool is_lvalue(const ast::Expr&) const;
 
-    // --- builtins ---
     std::optional<Type> check_builtin_print(const ast::CallExpr&, Scope&);
 
     void error(SourceLocation loc, std::string msg);
 
-    // --- state ---
     const ast::Program& prog_;
     std::string filename_;
     DiagnosticSink& sink_;
@@ -433,7 +411,6 @@ private:
     std::unordered_map<const ast::ImplDecl*, std::size_t> impl_method_offset_;
 };
 
-// ---------------------------------------------------------------------------
 SemanticAnalyzer::SemanticAnalyzer(const ast::Program& prog,
                                    std::string_view filename,
                                    DiagnosticSink& sink,
@@ -462,14 +439,14 @@ SemanticAnalyzer::SemanticAnalyzer(const ast::Program& prog,
     add_type("string", Primitive::String);
     add_type("char", Primitive::Char);
     add_type("void", Primitive::Void);
-    add_type("byte", Primitive::Byte);  // A.3.7: 1-байтный raw-тип
+    add_type("byte", Primitive::Byte);  // 1-байтный raw-тип
 
     auto add_fn = [&](std::string n, std::vector<Type> params, Type ret) {
         Symbol s; s.kind = Symbol::Kind::Fn; s.name = std::move(n);
         s.param_types = std::move(params); s.type = ret;
         global_scope_.declare(std::move(s));
     };
-    // print — особый, не описывается списком типов; см. check_builtin_print.
+    // print особый: не описывается списком типов, см. check_builtin_print
     add_fn("input", {}, Type(Primitive::String));
     add_fn("exit",  {Type(Primitive::I32)},    Type(Primitive::Void));
     add_fn("panic", {Type(Primitive::String)}, Type(Primitive::Void));
@@ -483,9 +460,9 @@ void SemanticAnalyzer::error(SourceLocation loc, std::string msg) {
 }
 
 bool SemanticAnalyzer::analyze() {
-    // Регистрируем импортированные модули как сущности Symbol::Module
-    // в нашем глобальном scope. Доступ к их членам — через `M.name`
-    // с фильтрацией по `pub` (A.3.6).
+    // Регистрируем импортированные модули как Symbol::Module в нашем
+    // глобальном scope. К их членам обращаемся через M.name, с фильтрацией
+    // по pub при доступе.
     for (const auto& mod_name : prog_.imports) {
         auto it = imports_.find(mod_name);
         if (it == imports_.end()) {
@@ -505,8 +482,8 @@ bool SemanticAnalyzer::analyze() {
 
     if (!require_main_) return !sink_.has_errors();
 
-    // Проверка точки входа (ТЗ §«Точка входа»): main() должна существовать
-    // и возвращать любой целочисленный тип. Параметров быть не должно.
+    // Проверка точки входа: должна существовать функция main(),
+    // без параметров, возвращающая любой целочисленный тип.
     auto main_sym = global_scope_.lookup_local("main");
     if (!main_sym || main_sym->kind != Symbol::Kind::Fn) {
         error({}, "program must declare 'fn main(...) <int-type> { ... }'");
@@ -526,7 +503,6 @@ bool SemanticAnalyzer::analyze() {
     return !sink_.has_errors();
 }
 
-// ---------------------------------------------------------------------------
 bool SemanticAnalyzer::process_decls(
         const std::vector<std::unique_ptr<ast::Decl>>& decls,
         Scope& target) {
@@ -627,7 +603,7 @@ bool SemanticAnalyzer::process_fn_signature(const ast::FnDecl& fd, Scope& target
 }
 
 bool SemanticAnalyzer::process_fn_body(const ast::FnDecl& fd, Scope& target) {
-    // extern fn — только сигнатура, тела нет (A.3.12).
+    // extern fn — только сигнатура, тела нет
     if (fd.is_extern) return true;
     auto sym = target.lookup_local(fd.name);
     if (!sym) return true;  // ошибка уже была
@@ -640,8 +616,8 @@ bool SemanticAnalyzer::process_fn_body(const ast::FnDecl& fd, Scope& target) {
         p.name = fd.params[i].name;
         p.loc = fd.params[i].loc;
         p.type = sym->param_types[i];
-        // Параметры мутабельны локально (call-by-value: мутации не видны
-        // вызывающей стороне). См. пример `swap` в semantics.md §13.bubble_sort.
+        // Параметры локально мутабельны: язык call-by-value, изменения
+        // не видны вызывающей стороне.
         p.is_mutable = true;
         if (!fn_scope->declare(std::move(p))) {
             error(fd.params[i].loc,
@@ -768,7 +744,6 @@ bool SemanticAnalyzer::process_impl_bodies(const ast::ImplDecl& im,
     return true;
 }
 
-// ---------------------------------------------------------------------------
 std::optional<Type> SemanticAnalyzer::resolve_type(const ast::TypeExpr& te,
                                                    Scope& scope) {
     if (auto* nt = dynamic_cast<const ast::NamedType*>(&te)) {
@@ -795,7 +770,7 @@ std::optional<Type> SemanticAnalyzer::resolve_type(const ast::TypeExpr& te,
         a->size = at->size;
         return Type(std::move(a));
     }
-    // *T — указатель (A.2.14). *void и *byte — raw pointers (A.3.7).
+    // *T — указатель. *void и *byte считаются сырыми указателями.
     if (auto* pt = dynamic_cast<const ast::PointerType*>(&te)) {
         auto pointee = resolve_type(*pt->pointee, scope);
         if (!pointee) return std::nullopt;
@@ -808,7 +783,6 @@ std::optional<Type> SemanticAnalyzer::resolve_type(const ast::TypeExpr& te,
     return std::nullopt;
 }
 
-// ---------------------------------------------------------------------------
 bool SemanticAnalyzer::check_block(const ast::BlockStmt& b, Scope& parent) {
     auto scope = std::make_unique<Scope>(&parent);
     for (const auto& s : b.stmts) {
@@ -964,15 +938,13 @@ bool SemanticAnalyzer::check_while(const ast::WhileStmt& w, Scope& scope) {
     return ok;
 }
 
-// ---------------------------------------------------------------------------
 bool SemanticAnalyzer::is_lvalue(const ast::Expr& e) const {
     return dynamic_cast<const ast::IdentExpr*>(&e) != nullptr
         || dynamic_cast<const ast::FieldExpr*>(&e) != nullptr
         || dynamic_cast<const ast::IndexExpr*>(&e) != nullptr
-        || dynamic_cast<const ast::DerefExpr*>(&e) != nullptr;  // A.2.14: *p = …
+        || dynamic_cast<const ast::DerefExpr*>(&e) != nullptr;  // *p = ... тоже сюда
 }
 
-// ---------------------------------------------------------------------------
 std::optional<Type> SemanticAnalyzer::check_expr(const ast::Expr& e, Scope& scope) {
     auto record = [&](std::optional<Type> t) -> std::optional<Type> {
         if (t) expr_types_[&e] = *t;
@@ -1002,18 +974,18 @@ std::optional<Type> SemanticAnalyzer::check_expr(const ast::Expr& e, Scope& scop
     if (auto* c = dynamic_cast<const ast::CallExpr*>(&e))      return record(check_call(*c, scope));
     if (auto* a = dynamic_cast<const ast::ArrayLit*>(&e))      return record(check_array_lit(*a, scope));
     if (auto* s = dynamic_cast<const ast::StructLit*>(&e))     return record(check_struct_lit(*s, scope));
-    // A.2.14: указатели.
+    // Указатели
     if (dynamic_cast<const ast::NullLit*>(&e)) {
-        // null имеет тип `*void` (raw); приводится к любому *T при widening'е.
+        // null имеет тип *void (raw) и приводится к любому *T неявно
         auto p = std::make_shared<PointerTy>();
         p->pointee = Type(Primitive::Void);
         p->is_raw = true;
         return record(Type(std::move(p)));
     }
     if (auto* ao = dynamic_cast<const ast::AddressOfExpr*>(&e)) {
-        // &x: x должен быть lvalue (Ident/Field/Index/Deref) — результат *T.
-        // Допускается также &fn — взятие адреса функции (A.3.7 function pointer):
-        // тип результата — FnPointerTy. Реализуем позже; пока ошибка.
+        // &x: x должен быть lvalue (Ident/Field/Index/Deref), результат — *T.
+        // &fn — взятие адреса функции, должно бы давать FnPointerTy. Пока не
+        // реализовано, поэтому ругаемся явно.
         if (auto* id = dynamic_cast<const ast::IdentExpr*>(ao->operand.get())) {
             auto sym = scope.lookup(id->name);
             if (sym && sym->kind == Symbol::Kind::Fn) {
@@ -1161,7 +1133,7 @@ std::optional<Type> SemanticAnalyzer::check_binary(const ast::BinaryExpr& b,
     if ((op == Op::Eq || op == Op::NotEq) && a->is_bool() && c->is_bool()) {
         return Type(Primitive::Bool);
     }
-    // Char == / != (только равенство; spec §2.7 «не арифметический тип»).
+    // У char доступны только == и !=, потому что он не арифметический.
     if ((op == Op::Eq || op == Op::NotEq)
         && a->is(Primitive::Char) && c->is(Primitive::Char)) {
         return Type(Primitive::Bool);
@@ -1256,7 +1228,7 @@ std::optional<Type> SemanticAnalyzer::check_field(const ast::FieldExpr& e,
                               id->name + "' has no member '" + e.field + "'");
                 return std::nullopt;
             }
-            // pub-фильтрация для модулей (A.3.6).
+            // Для модулей применяем фильтрацию по pub.
             if (sym->kind == Symbol::Kind::Module && !m->is_pub) {
                 error(e.loc, "'" + e.field + "' is not exported from module '" +
                              id->name + "'");
@@ -1341,7 +1313,7 @@ std::optional<Type> SemanticAnalyzer::check_call(const ast::CallExpr& e,
             if (base_sym && (base_sym->kind == Symbol::Kind::Namespace
                           || base_sym->kind == Symbol::Kind::Module)) {
                 auto m = base_sym->ns_scope->lookup_local(fe->field);
-                // Для Module — фильтрация по pub (A.3.6).
+                // Для Module применяем фильтрацию по pub
                 if (m && base_sym->kind == Symbol::Kind::Module && !m->is_pub) {
                     error(fe->loc, "'" + fe->field + "' is not exported from module '" +
                                    base_id->name + "'");

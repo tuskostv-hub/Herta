@@ -1,22 +1,16 @@
-// Module `herta.llvm` — текстовая эмиссия LLVM IR из herta.ir.
+// Бэкенд. Принимает IR-модули в топологическом порядке, склеивает их в один
+// LLVM-модуль и отдаёт текст .ll. Дальше его собирает clang вместе с runtime.c.
 //
-// Финальная фаза (бэкенд) для пути нативной компиляции. Принимает набор
-// IR-модулей в топологическом порядке, склеивает их в один LLVM модуль и
-// возвращает текст .ll. Компилятор затем передаёт этот текст в clang-22
-// вместе с runtime.c для получения исполняемого файла.
+// Каждая переменная и каждый временный регистр получают alloca во входном
+// блоке функции, чтение и запись идут через load/store. clang -O1 потом
+// прогоняет mem2reg и почти всё это разворачивается обратно в регистры.
+// Массивы и структуры — обычные LLVM-агрегаты в alloca того же типа,
+// копирование по значению получается через load и store целиком. Строки —
+// пара { i64 len, ptr data }, операции с ними идут через функции C-рантайма.
 //
-// Архитектурные решения:
-//   * Memory-form для всех операндов. Каждая Var и каждый Temp с известным
-//     назначением — alloca'е во входном блоке функции. Чтение операнда —
-//     load, запись — store. clang -O1 проводит mem2reg и устраняет лишнее.
-//   * Aggregaты (массивы, структуры) — first-class LLVM aggregates, хранятся
-//     в alloca'ах того же типа. Копирование по значению — load всей агрегаты
-//     + store в новый alloca, реализуется естественно.
-//   * Строки — { i64 len, ptr data } по значению, операции через C runtime.
-//   * Неявное widening (semantics.md §6.2): добавляется sext/zext/sitofp в
-//     точке использования (IR не несёт явных Cast для widening).
-//   * Runtime-проверки: для целочисленного / и %, и для индексирования
-//     массива вставляются проверки + переход на helper'ы из runtime.c.
+// Неявное расширение типов в IR явно не несётся, sext/zext/sitofp вставляются
+// здесь в точке использования. Перед делением, остатком и индексацией массивов
+// эмитятся проверки с переходом в helper-ы из runtime.c.
 
 export module herta.llvm;
 
@@ -27,10 +21,6 @@ import herta.ir;
 namespace herta::llvm_be {
 
 namespace ir = herta::ir;
-
-// ===========================================================================
-// Типы Herta ↔ LLVM
-// ===========================================================================
 
 struct TypeInfo {
     enum class Kind { Int, UInt, Float, Bool, Char, String, Void, Byte,
@@ -52,7 +42,7 @@ TypeInfo parse_type(std::string_view t) {
     if (t == "string") { r.kind = TypeInfo::Kind::String; return r; }
     if (t == "float32") { r.kind = TypeInfo::Kind::Float; r.bits = 32; return r; }
     if (t == "float64") { r.kind = TypeInfo::Kind::Float; r.bits = 64; return r; }
-    // *T — указатель (A.2.14)
+    // *T — указатель
     if (!t.empty() && t.front() == '*') {
         r.kind = TypeInfo::Kind::Pointer;
         r.elem_or_name = std::string(t.substr(1));
@@ -73,8 +63,20 @@ TypeInfo parse_type(std::string_view t) {
     if (try_prefix("uint", TypeInfo::Kind::UInt)) return r;
     // [T; N]
     if (t.size() >= 4 && t.front() == '[') {
-        auto semi = t.find(';');
-        auto rb = t.find(']');
+        // Скан с учётом вложенности: найти `;` и `]` на нулевой глубине.
+        int depth = 0;
+        auto semi = std::string_view::npos;
+        auto rb = std::string_view::npos;
+        for (std::size_t k = 1; k < t.size(); ++k) {
+            if (t[k] == '[') { ++depth; }
+            else if (t[k] == ']') {
+                if (depth == 0) { rb = k; break; }
+                --depth;
+            }
+            else if (t[k] == ';' && depth == 0 && semi == std::string_view::npos) {
+                semi = k;
+            }
+        }
         if (semi != std::string_view::npos && rb != std::string_view::npos) {
             r.kind = TypeInfo::Kind::Array;
             r.elem_or_name = std::string(t.substr(1, semi - 1));
@@ -144,10 +146,6 @@ std::string common_numeric(const std::string& a, const std::string& b) {
     return std::format("{}{}", any_unsigned ? "uint" : "int", bits);
 }
 
-// ===========================================================================
-// Emitter
-// ===========================================================================
-
 export class Emitter {
 public:
     explicit Emitter(std::vector<ir::Module> modules)
@@ -188,14 +186,12 @@ private:
     // инструкции.
     void ensure_block(FnState& st);
 
-    // ---- Подготовка ----
     void infer_types(FnState& st);
     void emit_function(std::size_t mod_idx, const ir::Function& fn);
     std::string mangle(std::size_t mod_idx, const std::string& fn_name) const;
     std::string resolve_callee(std::size_t caller_mod, const std::string& callee,
                                std::size_t& out_mod) const;
 
-    // ---- Внутрифункциональные ----
     std::string fresh_ssa(FnState& st);
     void ensure_alloca_var(FnState& st, const std::string& name,
                            const std::string& herta_ty);
@@ -218,7 +214,6 @@ private:
     void emit_make_struct(FnState& st, const ir::Instr& ins);
     void emit_cast(FnState& st, const ir::Instr& ins);
 
-    // ---- Глобальное ----
     std::vector<ir::Module> modules_;
     std::string out_;
     // Пер-модуль: имя функции → индекс модуля (для resolve), и общий список
@@ -240,15 +235,22 @@ private:
     int field_index(const std::string& struct_name, const std::string& field) const;
 };
 
-// ===========================================================================
-// Public entry
-// ===========================================================================
-
 std::string Emitter::resolve_type(std::string s) const {
-    // Рекурсивно раскрываем элемент массива.
+    // Рекурсивно раскрываем элемент массива (с учётом вложенности).
     if (s.size() >= 4 && s.front() == '[') {
-        auto semi = s.find(';');
-        auto rb = s.find(']');
+        int depth = 0;
+        auto semi = std::string::npos;
+        auto rb = std::string::npos;
+        for (std::size_t k = 1; k < s.size(); ++k) {
+            if (s[k] == '[') { ++depth; }
+            else if (s[k] == ']') {
+                if (depth == 0) { rb = k; break; }
+                --depth;
+            }
+            else if (s[k] == ';' && depth == 0 && semi == std::string::npos) {
+                semi = k;
+            }
+        }
         if (semi != std::string::npos && rb != std::string::npos) {
             auto elem = s.substr(1, semi - 1);
             auto rest = s.substr(semi);  // "; N]"
@@ -261,7 +263,6 @@ std::string Emitter::resolve_type(std::string s) const {
         if (it == alias_map_.end()) break;
         s = it->second;
     }
-    if (s.size() >= 4 && s.front() == '[') return resolve_type(s);
     return s;
 }
 
@@ -320,10 +321,6 @@ std::string Emitter::emit() {
     return out_;
 }
 
-// ===========================================================================
-// Preamble / runtime decls / struct typedefs
-// ===========================================================================
-
 void Emitter::emit_preamble() {
     out_ += "target triple = \"x86_64-pc-linux-gnu\"\n\n";
     out_ += "%struct.herta_string = type { i64, ptr }\n\n";
@@ -363,9 +360,9 @@ void Emitter::emit_runtime_decls() {
 }
 
 void Emitter::emit_string_globals() {
-    // Кладём в конец — допустимо для LLVM IR. Все литералы null-терминированы
-    // (последний байт — \00), чтобы их `.data` можно было передавать в C как
-    // `const char*` без дополнительной конверсии (A.3.12).
+    // Кладём в конец — LLVM IR такое разрешает. Все литералы null-терминированы
+    // (последний байт — \00), чтобы их .data можно было отдавать в C как const char*
+    // без лишних конверсий.
     for (std::size_t i = 0; i < strings_.size(); ++i) {
         const auto& s = strings_[i];
         out_ += std::format("@.str.{} = private unnamed_addr constant [{} x i8] c\"",
@@ -391,14 +388,10 @@ int Emitter::field_index(const std::string& struct_name,
     return -1;
 }
 
-// ===========================================================================
-// Name mangling + cross-module resolution
-// ===========================================================================
-
 std::string Emitter::mangle(std::size_t mod_idx, const std::string& fn_name) const {
     if (fn_name == "main") return "main";
-    // Extern (C) функции: используем имя как есть, без префикса модуля,
-    // чтобы линкер нашёл символ libc (printf и т.п.). См. A.3.12.
+    // Для extern (C) функций имя оставляем как есть, без префикса модуля,
+    // чтобы линкер нашёл символ из libc (например printf).
     if (auto it = mod_funcs_[mod_idx].find(fn_name);
         it != mod_funcs_[mod_idx].end() && it->second->is_extern) {
         return fn_name;
@@ -429,10 +422,6 @@ std::string Emitter::resolve_callee(std::size_t caller_mod,
     }
     return {};
 }
-
-// ===========================================================================
-// Type inference: temp_ty, var_ty
-// ===========================================================================
 
 void Emitter::infer_types(FnState& st) {
     auto operand_type = [&](const ir::Operand& o) -> std::string {
@@ -539,7 +528,7 @@ void Emitter::infer_types(FnState& st) {
             case IK::MakeStruct:
                 set_dst(ins.type_name);
                 break;
-            // A.2.14: указатели.
+            // Работа с указателями
             case IK::AddressOf: {
                 auto at = operand_type(ins.a);
                 if (!at.empty()) set_dst("*" + at);
@@ -556,10 +545,6 @@ void Emitter::infer_types(FnState& st) {
         }
     }
 }
-
-// ===========================================================================
-// Function emission
-// ===========================================================================
 
 std::string Emitter::fresh_ssa(FnState& st) {
     return std::format("%t{}", st.ssa_counter++);
@@ -582,7 +567,7 @@ void Emitter::ensure_alloca_temp(FnState& st, std::int64_t id,
 }
 
 void Emitter::emit_function(std::size_t mod_idx, const ir::Function& fn) {
-    // Extern (C) функции — только declare, без тела (A.3.12).
+    // Extern-функции эмитим как declare, без тела
     if (fn.is_extern) {
         auto canonical = mangle(mod_idx, fn.name);
         out_ += std::format("declare {} @{}(",
@@ -641,9 +626,7 @@ void Emitter::emit_function(std::size_t mod_idx, const ir::Function& fn) {
     out_ += "}\n\n";
 }
 
-// ===========================================================================
 // eval_operand / store_to / widen
-// ===========================================================================
 
 std::pair<std::string, std::string>
 Emitter::eval_operand(FnState& st, const ir::Operand& o) {
@@ -725,8 +708,8 @@ std::string Emitter::widen(FnState& st, const std::string& value,
     auto a = parse_type(from_ty);
     auto b = parse_type(to_ty);
 
-    // A.3.12: конверсия `string → *byte` / `*void` для FFI границы.
-    // Берём поле .data из herta_string-агрегата.
+    // На границе с C преобразуем string → *byte / *void:
+    // вытаскиваем поле .data из герта-строки.
     if (a.kind == TypeInfo::Kind::String && b.kind == TypeInfo::Kind::Pointer) {
         auto v = fresh_ssa(st);
         st.body += std::format(
@@ -734,8 +717,7 @@ std::string Emitter::widen(FnState& st, const std::string& value,
         return v;
     }
 
-    // Pointer ↔ pointer (A.2.14/A.3.7): LLVM использует opaque `ptr` —
-    // приведение не порождает инструкции.
+    // Указатель в указатель: в LLVM это opaque ptr, никаких инструкций не нужно.
     if (a.kind == TypeInfo::Kind::Pointer && b.kind == TypeInfo::Kind::Pointer) {
         return value;
     }
@@ -781,10 +763,6 @@ std::string Emitter::widen(FnState& st, const std::string& value,
     }
     return value;
 }
-
-// ===========================================================================
-// Instruction emission
-// ===========================================================================
 
 void Emitter::ensure_block(FnState& st) {
     if (!st.terminated) return;
@@ -905,9 +883,9 @@ void Emitter::emit_instr(FnState& st, const ir::Instr& ins) {
         }
         case IK::MakeArray:  emit_make_array(st, ins); return;
         case IK::MakeStruct: emit_make_struct(st, ins); return;
-        // A.2.14: указатели.
+        // Работа с указателями
         case IK::AddressOf: {
-            // ins.a — Var/Temp. Их alloca-адрес и есть указатель.
+            // ins.a — Var/Temp; их адрес alloca и есть указатель.
             std::string addr;
             if (ins.a.kind == ir::OperandKind::Var) addr = st.var_addr.at(ins.a.str_v);
             else                                    addr = st.temp_addr.at(ins.a.int_v);

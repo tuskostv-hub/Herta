@@ -1,5 +1,4 @@
-// Module `herta.lexer` — лексический анализатор языка Herta.
-// Покрывает грамматику §2 specs/grammar.md.
+// Лексер: режет исходный текст на токены.
 
 export module herta.lexer;
 
@@ -8,12 +7,8 @@ import herta.common;
 
 namespace herta::lexer {
 
-// ===========================================================================
-// TokenKind / Token
-// ===========================================================================
-
 export enum class TokenKind : std::uint8_t {
-    // Спец
+    // Служебные
     Eof,
     Invalid,
 
@@ -24,7 +19,7 @@ export enum class TokenKind : std::uint8_t {
     CharLiteral,
     Identifier,
 
-    // Ключевые слова (18 шт — см. grammar.md §2.1)
+    // Ключевые слова языка
     KwFn,
     KwLet,
     KwVar,
@@ -43,8 +38,8 @@ export enum class TokenKind : std::uint8_t {
     KwPub,
     KwTrue,
     KwFalse,
-    KwNull,    // A.2.14: нулевой указатель
-    KwExtern,  // A.3.12: объявление внешней (C) функции
+    KwNull,    // нулевой указатель
+    KwExtern,  // объявление функции из libc
 
     // Арифметика
     Plus, Minus, Star, Slash, Percent,
@@ -54,10 +49,10 @@ export enum class TokenKind : std::uint8_t {
 
     // Логика
     AmpAmp, PipePipe, Bang,
-    // Унарный `&` — address-of (A.2.14). Не используется для bitwise-AND.
+    // Унарный & — взятие адреса. Битового AND в языке нет.
     Amp,
 
-    // Присваивание / вывод типа / возвращаемый тип
+    // Присваивание, вывод типа, стрелка возврата
     Eq, ColonEq, Arrow,
 
     // Разделители
@@ -75,29 +70,24 @@ export struct Token {
     herta::common::SourceLocation loc;
 };
 
-// Человеко-читаемое имя вида токена (для --dump-tokens и диагностики).
+// Понятное имя вида токена для --dump-tokens и сообщений об ошибках.
 export std::string_view to_string(TokenKind k) noexcept;
 
-// Полное представление: "<line>:<col>  <KIND>  '<lexeme>'".
+// Полное представление токена: "<line>:<col>  <KIND>  '<lexeme>'".
 export std::string to_string(const Token& t);
 
-// ===========================================================================
-// Lexer
-// ===========================================================================
-
-// При обнаружении ошибки добавляет диагностику в sink и останавливается
-// (поведение «остановка на первой ошибке» из ТЗ).
+// На первой же ошибке кладёт диагностику в sink и останавливается.
 export class Lexer {
 public:
     Lexer(const herta::common::SourceFile& src,
           herta::common::DiagnosticSink& sink);
 
-    // Возвращает все токены до Eof включительно.
-    // На ошибке — std::unexpected{}; детали в sink.
+    // Отдаёт все токены до Eof включительно. На ошибке — std::unexpected{},
+    // подробности уходят в sink.
     std::expected<std::vector<Token>, std::monostate> tokenize();
 
 private:
-    // Курсор / источник.
+    // Текущая позиция в исходнике
     bool at_end() const noexcept;
     char peek(std::size_t lookahead = 0) const noexcept;
     char advance() noexcept;
@@ -106,7 +96,7 @@ private:
 
     void skip_whitespace_and_comments();
 
-    // Конструктор токена по диапазону [start_pos, pos_).
+    // Собрать токен по диапазону [start_pos, pos_).
     Token make_token(TokenKind kind,
                      std::size_t start_pos,
                      herta::common::SourceLocation start_loc) const;
@@ -132,10 +122,6 @@ private:
     bool fatal_ = false;
 };
 
-// ===========================================================================
-// Implementation
-// ===========================================================================
-
 namespace {
 
 constexpr bool is_letter(char c) noexcept {
@@ -151,7 +137,7 @@ constexpr bool is_letter_or_digit(char c) noexcept {
     return is_letter(c) || is_digit(c);
 }
 
-// Таблица ключевых слов — порядок согласно grammar.md §2.1.
+// Таблица ключевых слов в порядке из грамматики.
 struct KeywordEntry {
     std::string_view text;
     TokenKind kind;
@@ -257,10 +243,6 @@ std::string to_string(const Token& t) {
     return os.str();
 }
 
-// ---------------------------------------------------------------------------
-// Lexer
-// ---------------------------------------------------------------------------
-
 Lexer::Lexer(const herta::common::SourceFile& src,
              herta::common::DiagnosticSink& sink)
     : src_(src), sink_(sink) {}
@@ -325,8 +307,8 @@ void Lexer::skip_whitespace_and_comments() {
         if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
             advance();
         } else if (c == '/' && peek(1) == '/') {
-            // Однострочный комментарий — поглощаем до '\n' или EOF.
-            // Сам '\n' оставляем — он отработает на следующем шаге.
+            // Однострочный комментарий: пропускаем всё до перевода строки
+            // (сам перевод строки оставляем, он отработает на следующем шаге)
             while (!at_end() && peek() != '\n') advance();
         } else {
             break;
@@ -347,7 +329,7 @@ Token Lexer::scan_identifier_or_keyword(herta::common::SourceLocation start,
 
 Token Lexer::scan_number(herta::common::SourceLocation start,
                          std::size_t start_pos) {
-    // Шестнадцатеричный литерал: "0x" hex_digit+
+    // Шестнадцатеричный литерал вида "0x" + hex-цифры
     if (peek() == '0' && (peek(1) == 'x' || peek(1) == 'X')) {
         advance();  // '0'
         advance();  // 'x' / 'X'
@@ -358,7 +340,7 @@ Token Lexer::scan_number(herta::common::SourceLocation start,
         while (!at_end() && is_hex_digit(peek())) advance();
         return make_token(TokenKind::IntLiteral, start_pos, start);
     }
-    // Двоичный литерал: "0b" [01]+
+    // Двоичный литерал вида "0b" + нули и единицы
     if (peek() == '0' && (peek(1) == 'b' || peek(1) == 'B')) {
         advance();  // '0'
         advance();  // 'b' / 'B'
@@ -370,16 +352,16 @@ Token Lexer::scan_number(herta::common::SourceLocation start,
         return make_token(TokenKind::IntLiteral, start_pos, start);
     }
 
-    // Десятичная целая часть.
+    // Десятичная целая часть
     while (!at_end() && is_digit(peek())) advance();
 
-    // Float? Грамматика требует digit "." digit { digit } [ exponent ].
-    // Значит "1." без цифры после точки — это IntLiteral "1" + Dot.
+    // Float? По грамматике нужно digit "." digit { digit } [ exponent ].
+    // То есть "1." без цифры после точки даёт два токена: IntLiteral "1" и Dot.
     if (peek() == '.' && is_digit(peek(1))) {
         advance();  // '.'
         while (!at_end() && is_digit(peek())) advance();
 
-        // Опциональная экспонента: (e|E) [+|-] digit+
+        // Необязательная экспонента: (e|E) [+|-] цифры
         if (peek() == 'e' || peek() == 'E') {
             auto exp_loc = current_loc();
             advance();  // 'e' / 'E'
@@ -459,10 +441,10 @@ Token Lexer::scan_char(herta::common::SourceLocation start, std::size_t start_po
             return Token{TokenKind::Invalid, {}, start};
         }
     } else {
-        // UTF-8: первый байт определяет длину последовательности.
+        // UTF-8: длину последовательности задаёт первый байт
         auto first = static_cast<unsigned char>(peek());
         int total;
-        if (first < 0x80)            total = 1;  // ASCII
+        if (first < 0x80)            total = 1;  // обычный ASCII
         else if ((first & 0xE0) == 0xC0) total = 2;
         else if ((first & 0xF0) == 0xE0) total = 3;
         else if ((first & 0xF8) == 0xF0) total = 4;
@@ -496,7 +478,7 @@ Token Lexer::scan_punct_or_op(herta::common::SourceLocation start,
                               std::size_t start_pos) {
     char c = advance();
     switch (c) {
-        // Однозначные односимвольные.
+        // Однозначные односимвольные токены
         case '+': return make_token(TokenKind::Plus, start_pos, start);
         case '*': return make_token(TokenKind::Star, start_pos, start);
         case '/': return make_token(TokenKind::Slash, start_pos, start);
@@ -511,7 +493,7 @@ Token Lexer::scan_punct_or_op(herta::common::SourceLocation start,
         case '[': return make_token(TokenKind::LBracket, start_pos, start);
         case ']': return make_token(TokenKind::RBracket, start_pos, start);
 
-        // Двусимвольные с одиночной альтернативой (maximal munch).
+        // Двусимвольные с альтернативой из одного символа (maximal munch)
         case '=':
             if (match('=')) return make_token(TokenKind::EqEq, start_pos, start);
             return make_token(TokenKind::Eq, start_pos, start);
@@ -531,10 +513,10 @@ Token Lexer::scan_punct_or_op(herta::common::SourceLocation start,
             if (match('=')) return make_token(TokenKind::ColonEq, start_pos, start);
             return make_token(TokenKind::Colon, start_pos, start);
 
-        // Только двусимвольные — одиночный символ — ошибка.
+        // Только двусимвольные. Одиночный символ — ошибка.
         case '&':
             if (match('&')) return make_token(TokenKind::AmpAmp, start_pos, start);
-            // Одиночный `&` — address-of (A.2.14).
+            // Одиночный & — взятие адреса
             return make_token(TokenKind::Amp, start_pos, start);
         case '|':
             if (match('|')) return make_token(TokenKind::PipePipe, start_pos, start);

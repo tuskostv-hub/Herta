@@ -231,9 +231,7 @@ void test_string_concat() {
     contains("concat", ir, "concat ");
 }
 
-// ============================================================
-// Optimizer tests (B.2.2): constant folding + propagation + DCE
-// ============================================================
+// Тесты оптимизатора: constant folding, propagation, DCE.
 
 void test_fold_int_arith() {
     auto ir = lower(R"(
@@ -261,7 +259,7 @@ void test_fold_div_by_zero_not_folded() {
         module m;
         fn f() int32 { return 10 / 0; }
     )", "fold_div0", /*main=*/false, /*opt=*/true);
-    // Деление на ноль не сворачивается — runtime error по спеке (semantics §11).
+    // Деление на ноль не сворачивается, оно должно дойти до рантайма как ошибка.
     contains("fold_div0", ir, "div 10, 0");
 }
 

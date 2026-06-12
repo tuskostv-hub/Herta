@@ -1,6 +1,5 @@
-// Module `herta.parser` — синтаксический анализатор языка Herta.
-// Рекурсивный спуск по грамматике §3 specs/grammar.md.
-// Останавливается на первой ошибке (per ТЗ; восстановление — не реализовано).
+// Парсер: строит AST из потока токенов. Рекурсивный спуск по грамматике.
+// Падает на первой же ошибке, восстановления нет.
 
 export module herta.parser;
 
@@ -19,33 +18,26 @@ using herta::lexer::TokenKind;
 
 namespace ast = herta::ast;
 
-// ===========================================================================
-// Parser
-// ===========================================================================
-
 export class Parser {
 public:
     Parser(std::span<const Token> tokens,
            std::string_view filename,
            DiagnosticSink& sink);
 
-    // На ошибке — std::unexpected{}, детали в sink.
+    // На ошибке возвращает std::unexpected{}, подробности уходят в sink.
     std::expected<ast::Program, std::monostate> parse_program();
 
 private:
-    // --- token stream ---
     const Token& peek(std::size_t offset = 0) const noexcept;
     const Token& current() const noexcept { return peek(0); }
     bool check(TokenKind k) const noexcept { return current().kind == k; }
     bool match(TokenKind k) noexcept;
     const Token& advance() noexcept;
-    bool expect(TokenKind k, std::string_view what);  // ошибка если не совпало
+    bool expect(TokenKind k, std::string_view what);  // ругается, если не совпало
 
-    // --- ошибки ---
     void error_at(const Token& t, std::string msg);
     void error(std::string msg) { error_at(current(), std::move(msg)); }
 
-    // --- декларации ---
     bool parse_module_header(ast::Program& prog);
     bool parse_imports(ast::Program& prog);
     std::unique_ptr<ast::Decl> parse_top_level();
@@ -55,10 +47,8 @@ private:
     std::unique_ptr<ast::NamespaceDecl> parse_namespace_decl();
     std::unique_ptr<ast::ImplDecl> parse_impl_decl();
 
-    // --- типы ---
     std::unique_ptr<ast::TypeExpr> parse_type_expr();
 
-    // --- инструкции ---
     std::unique_ptr<ast::BlockStmt> parse_block();
     std::unique_ptr<ast::Stmt> parse_stmt();
     std::unique_ptr<ast::Stmt> parse_var_decl_stmt(bool is_mutable);
@@ -67,7 +57,6 @@ private:
     std::unique_ptr<ast::Stmt> parse_while_stmt();
     std::unique_ptr<ast::Stmt> parse_assign_or_expr_stmt();
 
-    // --- выражения (precedence climbing) ---
     std::unique_ptr<ast::Expr> parse_expr();
     std::unique_ptr<ast::Expr> parse_or_expr();
     std::unique_ptr<ast::Expr> parse_and_expr();
@@ -83,7 +72,6 @@ private:
     std::unique_ptr<ast::Expr> parse_struct_lit(std::string type_name,
                                                 SourceLocation start);
 
-    // --- литералы ---
     std::optional<std::int64_t> parse_int_lexeme(std::string_view lex,
                                                  SourceLocation loc);
     std::optional<double> parse_float_lexeme(std::string_view lex,
@@ -93,19 +81,16 @@ private:
     std::optional<std::uint32_t> parse_char_lexeme(std::string_view lex,
                                                    SourceLocation loc);
 
-    // --- state ---
     std::span<const Token> tokens_;
     std::string filename_;
     DiagnosticSink& sink_;
     std::size_t pos_ = 0;
     bool fatal_ = false;
-    bool allow_struct_lit_ = true;  // выключается в условиях if/while
+    bool allow_struct_lit_ = true;  // выключается в условиях if/while, чтобы не путать с блоком
     Token sentinel_{TokenKind::Eof, {}, {}};
 };
 
-// ===========================================================================
 // Implementation: общие хелперы
-// ===========================================================================
 
 Parser::Parser(std::span<const Token> tokens,
                std::string_view filename,
@@ -150,9 +135,7 @@ bool Parser::expect(TokenKind k, std::string_view what) {
     return false;
 }
 
-// ===========================================================================
 // Implementation: литералы
-// ===========================================================================
 
 std::optional<std::int64_t> Parser::parse_int_lexeme(std::string_view lex,
                                                      SourceLocation loc) {
@@ -188,7 +171,7 @@ std::optional<double> Parser::parse_float_lexeme(std::string_view lex,
     return value;
 }
 
-// `lex` — целиком, включая одинарные кавычки.
+// lex приходит целиком, вместе с одинарными кавычками.
 std::optional<std::uint32_t> Parser::parse_char_lexeme(std::string_view lex,
                                                        SourceLocation loc) {
     if (lex.size() < 3 || lex.front() != '\'' || lex.back() != '\'') {
@@ -218,7 +201,7 @@ std::optional<std::uint32_t> Parser::parse_char_lexeme(std::string_view lex,
                 return std::nullopt;
         }
     }
-    // UTF-8 декодирование (A.1.2): один codepoint из 1-4 байт.
+    // UTF-8 декодирование: один codepoint из 1–4 байт.
     auto b0 = static_cast<unsigned char>(inner[0]);
     int n;
     std::uint32_t cp;
@@ -253,7 +236,7 @@ std::optional<std::uint32_t> Parser::parse_char_lexeme(std::string_view lex,
     return cp;
 }
 
-// `lex` приходит ВКЛЮЧАЯ кавычки.
+// lex приходит вместе с двойными кавычками.
 std::optional<std::string> Parser::parse_string_lexeme(std::string_view lex,
                                                        SourceLocation loc) {
     if (lex.size() < 2 || lex.front() != '"' || lex.back() != '"') {
@@ -273,7 +256,7 @@ std::optional<std::string> Parser::parse_string_lexeme(std::string_view lex,
                 case 't':  out += '\t'; break;
                 case 'r':  out += '\r'; break;
                 default:
-                    // лексер не должен это пропустить, но на всякий
+                    // лексер должен был это поймать, но на всякий случай
                     error_at(Token{TokenKind::Invalid, lex, loc},
                              std::format("invalid escape: \\{}", lex[i]));
                     return std::nullopt;
@@ -285,9 +268,7 @@ std::optional<std::string> Parser::parse_string_lexeme(std::string_view lex,
     return out;
 }
 
-// ===========================================================================
 // Implementation: верхний уровень
-// ===========================================================================
 
 std::expected<ast::Program, std::monostate> Parser::parse_program() {
     ast::Program prog;
@@ -352,7 +333,7 @@ std::unique_ptr<ast::Decl> Parser::parse_top_level() {
     switch (current().kind) {
         case TokenKind::KwFn:        d = parse_fn_decl(); break;
         case TokenKind::KwExtern: {
-            // `extern fn name(args) ret;` — без тела (A.3.12).
+            // extern fn name(args) ret; — объявление без тела
             advance();  // 'extern'
             if (!check(TokenKind::KwFn)) {
                 error("'extern' must be followed by 'fn'");
@@ -577,14 +558,12 @@ std::unique_ptr<ast::ImplDecl> Parser::parse_impl_decl() {
     return im;
 }
 
-// ===========================================================================
 // Implementation: типы
-// ===========================================================================
 
 std::unique_ptr<ast::TypeExpr> Parser::parse_type_expr() {
     auto start = current().loc;
 
-    // *T — указатель (A.2.14)
+    // *T — указатель
     if (match(TokenKind::Star)) {
         auto pointee = parse_type_expr();
         if (!pointee) return nullptr;
@@ -594,7 +573,7 @@ std::unique_ptr<ast::TypeExpr> Parser::parse_type_expr() {
         return p;
     }
 
-    // fn(T1, T2) R — указатель на функцию (A.3.7)
+    // fn(T1, T2) R — указатель на функцию
     if (match(TokenKind::KwFn)) {
         if (!expect(TokenKind::LParen, "'(' after 'fn' in function pointer type"))
             return nullptr;
@@ -656,9 +635,7 @@ std::unique_ptr<ast::TypeExpr> Parser::parse_type_expr() {
     return n;
 }
 
-// ===========================================================================
 // Implementation: инструкции
-// ===========================================================================
 
 std::unique_ptr<ast::BlockStmt> Parser::parse_block() {
     auto start = current().loc;
@@ -726,7 +703,7 @@ std::unique_ptr<ast::Stmt> Parser::parse_var_decl_stmt(bool is_mutable) {
         if (!type) return nullptr;
         if (!expect(TokenKind::Eq, "'=' in variable declaration")) return nullptr;
     } else if (match(TokenKind::ColonEq)) {
-        // вывод типа — без `: T`
+        // тип будет выведен из инициализатора
     } else {
         error("expected ':' (with type) or ':=' (type inference)");
         return nullptr;
@@ -765,7 +742,7 @@ std::unique_ptr<ast::Stmt> Parser::parse_if_stmt() {
     auto start = current().loc;
     advance();  // 'if'
 
-    // Условие — без струкур-литералов (как в Go).
+    // В условии запрещаем struct-литералы, чтобы не путались с блоком (как в Go)
     bool saved = allow_struct_lit_;
     allow_struct_lit_ = false;
     auto cond = parse_expr();
@@ -814,12 +791,12 @@ std::unique_ptr<ast::Stmt> Parser::parse_while_stmt() {
 }
 
 namespace {
-// Проверяет, что выражение — допустимый lvalue (Ident / Field / Index / Deref).
+// Проверяет, что выражение — допустимый lvalue: Ident, Field, Index или Deref.
 bool is_lvalue(const ast::Expr& e) {
     return dynamic_cast<const ast::IdentExpr*>(&e) != nullptr
         || dynamic_cast<const ast::FieldExpr*>(&e) != nullptr
         || dynamic_cast<const ast::IndexExpr*>(&e) != nullptr
-        || dynamic_cast<const ast::DerefExpr*>(&e) != nullptr;  // A.2.14: *p = …
+        || dynamic_cast<const ast::DerefExpr*>(&e) != nullptr;  // *p = ... тоже сюда
 }
 }  // anonymous namespace
 
@@ -856,9 +833,7 @@ std::unique_ptr<ast::Stmt> Parser::parse_assign_or_expr_stmt() {
     return s;
 }
 
-// ===========================================================================
 // Implementation: выражения (precedence climbing)
-// ===========================================================================
 
 std::unique_ptr<ast::Expr> Parser::parse_expr() {
     return parse_or_expr();
@@ -996,7 +971,7 @@ std::unique_ptr<ast::Expr> Parser::parse_unary_expr() {
         u->operand = std::move(operand);
         return u;
     }
-    // &expr — address-of (A.2.14).
+    // &expr — взятие адреса
     if (check(TokenKind::Amp)) {
         auto op_loc = current().loc;
         advance();
@@ -1007,7 +982,7 @@ std::unique_ptr<ast::Expr> Parser::parse_unary_expr() {
         a->operand = std::move(operand);
         return a;
     }
-    // *expr — разыменование (A.2.14). Является lvalue.
+    // *expr — разыменование, это lvalue
     if (check(TokenKind::Star)) {
         auto op_loc = current().loc;
         advance();
@@ -1199,9 +1174,9 @@ std::unique_ptr<ast::Expr> Parser::parse_primary_expr() {
         case TokenKind::Identifier: {
             auto name = std::string(current().lexeme);
             advance();
-            // Возможный struct-литерал.
+            // Возможно, это struct-литерал.
             if (allow_struct_lit_ && check(TokenKind::LBrace)) {
-                // peek: пустой `{}` или `id :` — struct lit; иначе — bare identifier.
+                // Смотрим вперёд: пустой {} или id : — это литерал, иначе просто идентификатор.
                 bool is_struct_lit =
                     peek(1).kind == TokenKind::RBrace
                     || (peek(1).kind == TokenKind::Identifier

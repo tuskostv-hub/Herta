@@ -126,7 +126,7 @@ int main() {
         "  var a: [int32; 2] = [1, 2];\n"
         "  assert(mut(a) == 99);\n  assert(a[0] == 1);\n  return 0;\n}\n", 0);
 
-    // A.2.14: указатели — взятие адреса, разыменование, запись через указатель.
+    // Указатели: взятие адреса, разыменование, запись через указатель.
     check("pointers",
         "module pointers;\n"
         "fn main() int32 {\n"
@@ -138,7 +138,7 @@ int main() {
         "  return 0;\n"
         "}\n", 0);
 
-    // A.2.14: null литерал и его проверка во время выполнения.
+    // Литерал null и его проверка в рантайме.
     check("null_pointer",
         "module null_pointer;\n"
         "fn main() int32 {\n"

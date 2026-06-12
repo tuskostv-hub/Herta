@@ -1,31 +1,26 @@
-// Демонстрация A.2.14 (указатели) и A.3.12 (FFI к libc).
-// `extern fn` объявляет внешнюю C-функцию; компилятор эмитит LLVM-declare
-// без префикса модуля, линкер связывает с libc по System V ABI.
-// Конверсия `string → *byte` происходит автоматически (.data из herta_string).
-// Запускать только через LLVM-бэкенд: ./build/myc examples/ffi_demo.herta --run
+// вызов функций libc через extern, плюс работа с указателями
 
 module ffi_demo;
 
-// Сигнатуры libc: только скаляры и raw-указатели (A.3.12 граница).
+// extern объявляет внешнюю функцию, её тело берётся из libc
 extern fn puts(s: *byte) int32;
 extern fn printf(fmt: *byte, x: int32) int32;
 
 fn main() int32 {
-    // 1. Простой вывод через puts.
+    // вывод строки через puts
     puts("=== ffi_demo ===");
 
-    // 2. Указатель на локальную переменную (A.2.14).
+    // адрес локальной переменной
     var x: int32 = 42;
     var p: *int32 = &x;
     assert(*p == 42);
     *p = 99;
     assert(*p == 99);
 
-    // 3. Нулевой указатель — null-литерал совместим с любым *T.
+    // нулевой указатель, разыменование поймает рантайм
     var nope: *int32 = null;
-    // *nope здесь привело бы к runtime error: null pointer dereference.
 
-    // 4. Форматированный вывод через printf (varargs упрощены до 1 аргумента).
+    // форматированный вывод через printf
     printf("printf via FFI: x = %d\n", *p);
 
     return 0;

@@ -1,4 +1,4 @@
-// Тесты парсера. Покрывают §3 specs/grammar.md.
+// Тесты парсера.
 
 import std;
 import herta.common;
@@ -25,7 +25,7 @@ void expect(bool ok, std::string_view test, std::string_view detail = {}) {
     if (!ok) fail(test, detail);
 }
 
-// Прогоняет lex + parse и ожидает успех.
+// Прогоняет лексер с парсером и ожидает успех.
 std::optional<ast::Program> parse_ok(std::string_view source,
                                      std::string_view test) {
     auto src = SourceFile{std::string(test), std::string(source)};
@@ -49,14 +49,14 @@ std::optional<ast::Program> parse_ok(std::string_view source,
     return std::move(*prog);
 }
 
-// Прогоняет lex + parse и ожидает ошибку парсера.
+// То же самое, но теперь ожидает ошибку парсера.
 void check_parse_error(std::string_view source, std::string_view test) {
     auto src = SourceFile{std::string(test), std::string(source)};
     DiagnosticSink sink;
     Lexer lex(src, sink);
     auto toks = lex.tokenize();
     if (!toks) {
-        // ok if even lex fails — это не наш тест-кейс, но не валим
+        // если упала уже лексика — это не наш кейс, но это тоже считается ок
         return;
     }
     Parser p(*toks, src.name(), sink);
@@ -68,7 +68,7 @@ void check_parse_error(std::string_view source, std::string_view test) {
     }
 }
 
-// Хелпер: каст указателя на узел.
+// Маленький хелпер: каст указателя на конкретный узел AST.
 template <typename T>
 const T* as(const ast::Stmt* s) { return dynamic_cast<const T*>(s); }
 template <typename T>
@@ -79,7 +79,6 @@ const T* as(const ast::Decl* d) { return dynamic_cast<const T*>(d); }
 }  // namespace
 
 int main() {
-    // -------- модуль и импорты --------
     {
         auto p = parse_ok("module hello; fn main() int32 { return 0; }",
                           "minimal");
@@ -101,7 +100,6 @@ int main() {
         }
     }
 
-    // -------- pub --------
     {
         auto p = parse_ok("module m; pub fn f() int32 { return 0; } fn g() int32 { return 0; }",
                           "pub fn");
@@ -111,13 +109,11 @@ int main() {
         }
     }
 
-    // -------- struct, type alias --------
     parse_ok("module m; pub struct Point { x: float64, y: float64, }",
              "struct");
     parse_ok("module m; pub type Meters = int32;", "type alias");
     parse_ok("module m; type Mat = [[float64; 4]; 4];", "nested array type");
 
-    // -------- impl --------
     {
         auto p = parse_ok(R"(
             module m;
@@ -141,7 +137,6 @@ int main() {
         }
     }
 
-    // -------- namespace --------
     parse_ok(R"(
         module m;
         namespace N {
@@ -150,7 +145,6 @@ int main() {
         }
     )", "namespace");
 
-    // -------- statements --------
     parse_ok("module m; fn f() int32 { let x: int32 = 5; return x; }",
              "let with type");
     parse_ok("module m; fn f() int32 { var x := 5; return x; }",
@@ -166,7 +160,6 @@ int main() {
     parse_ok("module m; fn f() void { ; ; }", "empty stmts");
     parse_ok("module m; fn f() void { { let x := 1; } }", "nested block");
 
-    // -------- expression precedence --------
     {
         // 1 + 2 * 3 → +(1, *(2, 3))
         auto p = parse_ok("module m; fn f() int32 { return 1 + 2 * 3; }",
@@ -191,7 +184,6 @@ int main() {
              "bool precedence");
     parse_ok("module m; fn f() int32 { return -x + y; }", "unary minus");
 
-    // -------- postfix --------
     parse_ok("module m; fn f() int32 { return arr[0]; }", "index");
     parse_ok("module m; fn f() int32 { return p.x; }", "field");
     parse_ok("module m; fn f() int32 { return add(1, 2); }", "call");
@@ -202,13 +194,11 @@ int main() {
     parse_ok("module m; fn f() int32 { return Module.func(1); }",
              "module access");
 
-    // -------- литералы --------
     parse_ok(R"(module m; fn f() string { return "hello\n"; })",
              "string with escape");
     parse_ok("module m; fn f() bool { return true; }", "bool literal");
     parse_ok("module m; fn f() float64 { return 3.14e+5; }", "float literal");
 
-    // -------- array/struct литералы --------
     parse_ok("module m; fn f() void { var a: [int32; 3] = [1, 2, 3]; }",
              "array literal");
     parse_ok(R"(
@@ -219,18 +209,18 @@ int main() {
     parse_ok("module m; struct E {} fn f() E { return E {}; }",
              "empty struct literal");
 
-    // struct literal в условии if — не допускается (как в Go)
+    // struct-литерал прямо в условии if запрещён (как в Go)
     {
         // `if x { y: 1 }` — `x` это условие, `{ y: 1 }` это блок (но он невалидный — `y` бессмыслен)
-        // Здесь проверим, что хотя бы парсер не пытается съесть `{y:1}` как struct lit
-        // Простая регрессия: if Point { x } должен парсить «Point» как ident, потом блок
-        // с одним выражением-стейтментом — но `x` без `;` тоже ошибка. Проверим другую:
+        // Проверяем, что парсер не пытается съесть {y:1} как struct lit.
+        // Простая регрессия: if Point { x } должен распарсить Point как ident,
+        // а потом блок с одним выражением. Тут x без ; тоже ошибка, так что
+        // подбираем другой кейс:
         // `if x { return 0; }` — должно работать
         parse_ok("module m; fn f() int32 { if x { return 0; } return 1; }",
                  "if cond no struct lit");
     }
 
-    // -------- ошибки --------
     check_parse_error("fn main() int32 { return 0; }",
                       "err missing module");
     check_parse_error("module m fn main() int32 { return 0; }",

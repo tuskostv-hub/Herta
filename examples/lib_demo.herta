@@ -1,5 +1,4 @@
-// Демонстрация использования библиотечного модуля MathLib.
-// Запускать: ./build/myc examples/lib_demo.herta
+// демонстрация импорта и вызова функций модуля MathLib
 
 module lib_demo;
 import MathLib;

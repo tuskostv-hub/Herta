@@ -1,4 +1,4 @@
-// Тесты лексера. Покрывают грамматику §2 spec/grammar.md.
+// Тесты лексера.
 
 import std;
 import herta.common;
@@ -86,7 +86,6 @@ void check_error(std::string_view source, std::string_view test) {
 }  // namespace
 
 int main() {
-    // ---------------- Пустой ввод / пробелы / комментарии ----------------
     check_seq("", {}, "empty");
     check_seq("   \t  ", {}, "spaces only");
     check_seq("\n\n\r\n", {}, "newlines only");
@@ -95,7 +94,6 @@ int main() {
     check_seq("// header\nfn",
         {{TokenKind::KwFn, "fn"}}, "comment then code");
 
-    // ---------------- Идентификаторы ----------------
     check_seq("x foo Bar2 _under __ a1b2",
         {{TokenKind::Identifier, "x"},
          {TokenKind::Identifier, "foo"},
@@ -104,7 +102,7 @@ int main() {
          {TokenKind::Identifier, "__"},
          {TokenKind::Identifier, "a1b2"}}, "identifiers");
 
-    // Имена базовых типов и builtin'ов — по плану §2.7 это Identifier.
+    // Имена базовых типов и builtin-ов — это просто Identifier, не ключевые слова.
     check_seq("int32 float64 bool string void print input exit panic self",
         {{TokenKind::Identifier, "int32"},
          {TokenKind::Identifier, "float64"},
@@ -117,7 +115,6 @@ int main() {
          {TokenKind::Identifier, "panic"},
          {TokenKind::Identifier, "self"}}, "builtins-as-identifiers");
 
-    // ---------------- Ключевые слова (все 18) ----------------
     check_seq("fn let var return if else while break continue "
               "struct type namespace impl module import pub true false",
         {{TokenKind::KwFn, "fn"},
@@ -139,7 +136,6 @@ int main() {
          {TokenKind::KwTrue, "true"},
          {TokenKind::KwFalse, "false"}}, "keywords");
 
-    // ---------------- Целочисленные литералы ----------------
     check_seq("0 42 1000 0xFF 0x0 0xAbCdEf",
         {{TokenKind::IntLiteral, "0"},
          {TokenKind::IntLiteral, "42"},
@@ -148,7 +144,6 @@ int main() {
          {TokenKind::IntLiteral, "0x0"},
          {TokenKind::IntLiteral, "0xAbCdEf"}}, "int literals");
 
-    // ---------------- Вещественные литералы ----------------
     check_seq("3.14 0.0 1.5e10 2.0E-3 1.23e+5 100.500",
         {{TokenKind::FloatLiteral, "3.14"},
          {TokenKind::FloatLiteral, "0.0"},
@@ -166,7 +161,6 @@ int main() {
          {TokenKind::Dot, "."},
          {TokenKind::Identifier, "x"}}, "field access");
 
-    // ---------------- Строки ----------------
     check_seq(R"("hello" "" "with spaces")",
         {{TokenKind::StringLiteral, R"("hello")"},
          {TokenKind::StringLiteral, R"("")"},
@@ -178,7 +172,6 @@ int main() {
          {TokenKind::StringLiteral, R"("\"")"},
          {TokenKind::StringLiteral, R"("\r\t\n\\\"")"}}, "strings escapes");
 
-    // ---------------- Операторы и разделители ----------------
     check_seq("+ - * / % == != < > <= >= && || ! = := -> : , ; . ( ) { } [ ]",
         {{TokenKind::Plus, "+"},
          {TokenKind::Minus, "-"},
@@ -208,7 +201,6 @@ int main() {
          {TokenKind::LBracket, "["},
          {TokenKind::RBracket, "]"}}, "operators");
 
-    // ---------------- Maximal munch ----------------
     check_seq("== = != ! <= < >= >",
         {{TokenKind::EqEq, "=="},
          {TokenKind::Eq, "="},
@@ -224,7 +216,6 @@ int main() {
          {TokenKind::Arrow, "->"},
          {TokenKind::Minus, "-"}}, "munch :=, ->");
 
-    // ---------------- Программа целиком ----------------
     check_seq("module hello;\nfn main() int32 { return 0; }",
         {{TokenKind::KwModule, "module"},
          {TokenKind::Identifier, "hello"},
@@ -249,7 +240,6 @@ int main() {
          {TokenKind::StringLiteral, R"("hi\n")"},
          {TokenKind::Semicolon, ";"}}, "let with string");
 
-    // ---------------- Позиции (line/col) ----------------
     {
         SourceFile src("<pos>", "a\n  b\n");
         DiagnosticSink sink;
@@ -268,13 +258,12 @@ int main() {
         }
     }
 
-    // ---------------- Ошибки ----------------
     check_error(R"("unterminated)", "err unterminated string at EOF");
     check_error("\"line\nbreak\"", "err newline inside string");
     check_error(R"("bad \q escape")", "err bad escape \\q");
     check_error("0x", "err empty hex literal");
     check_error("0xZ", "err non-hex digit");
-    // Одиночный `&` — теперь валиден (address-of, A.2.14).
+    // Одиночный & теперь валиден — это взятие адреса.
     check_error("a | b", "err lone |");
     check_error("a @ b", "err invalid character @");
     check_error("1.0e", "err exponent without digit");

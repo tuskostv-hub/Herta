@@ -1,25 +1,25 @@
-// Module `herta.ir` — промежуточное представление и фаза lowering AST → IR.
+// IR: промежуточное представление и фаза lowering AST → IR.
 //
-// Этап 5 из impl_plan.md (B.2.1). Линейный трёхадресный код:
-//   t = a OP b      ; бинарные операции
-//   t = OP a        ; унарные
-//   t = a           ; move
-//   t = (T) a       ; явное приведение типов
-//   t = call f(...) ; вызовы (плоское имя; namespace/module/T.method разрешены здесь)
-//   t = a[b]        ; индексирование
-//   t = a.field     ; доступ к полю
-//   a[b] = c        ; запись по индексу
-//   a.field = b     ; запись поля
-//   t = [a, b, ...] ; литерал массива
-//   t = T { a, ... }; литерал структуры (поля в порядке struct-декларации)
+// Линейный трёхадресный код:
+//   t = a OP b      // бинарные операции
+//   t = OP a        // унарные
+//   t = a           // move
+//   t = (T) a       // явное приведение типов
+//   t = call f(...) // вызовы (плоское имя; namespace/module/T.method уже разрешены)
+//   t = a[b]        // индексирование
+//   t = a.field     // доступ к полю
+//   a[b] = c        // запись по индексу
+//   a.field = b     // запись поля
+//   t = [a, b, ...] // литерал массива
+//   t = T { a, ... }// литерал структуры (поля в порядке struct-декларации)
 //   label L:
 //   goto L
 //   if a goto L1 else L2
 //   return [a]
 //
-// Lowering предполагает, что семантика прошла без ошибок и заполнила
-// SemanticAnalyzer::expression_types() и methods(). Эта фаза не диагностирует;
-// все unreachable-ситуации трактуются как internal-bugs.
+// Lowering предполагает, что семантика отработала без ошибок и заполнила
+// SemanticAnalyzer::expression_types() и methods(). Эта фаза диагностики не
+// делает; любая unreachable-ситуация — внутренний баг компилятора.
 
 export module herta.ir;
 
@@ -34,25 +34,23 @@ using herta::common::SourceLocation;
 namespace ast = herta::ast;
 namespace sema = herta::semantic;
 
-// ===========================================================================
-// Operand: temp register / variable / literal constant.
-// ===========================================================================
+// Operand: временный регистр, переменная или литерал.
 
 export enum class OperandKind : std::uint8_t {
     Temp,        // %t<id>
-    Var,         // именованная переменная / параметр
+    Var,         // именованная переменная или параметр
     IntC, FloatC, BoolC, StringC, CharC,
-    NullC,       // нулевой указатель (A.2.14)
-    Unit,        // отсутствие значения (для void-call)
+    NullC,       // нулевой указатель
+    Unit,        // отсутствие значения (для вызовов, возвращающих void)
 };
 
 export struct Operand {
     OperandKind kind = OperandKind::Unit;
-    std::int64_t int_v = 0;       // Temp id (кастуется); IntC value
-    double float_v = 0.0;          // FloatC value
-    bool bool_v = false;           // BoolC value
-    std::uint32_t char_v = 0;      // CharC value (codepoint)
-    std::string str_v;             // Var name; StringC value (без кавычек)
+    std::int64_t int_v = 0;       // id для Temp или значение IntC
+    double float_v = 0.0;          // значение FloatC
+    bool bool_v = false;           // значение BoolC
+    std::uint32_t char_v = 0;      // значение CharC (codepoint)
+    std::string str_v;             // имя Var или значение StringC (без кавычек)
 
     static Operand temp(int id) {
         Operand o; o.kind = OperandKind::Temp; o.int_v = id; return o;
@@ -81,22 +79,14 @@ export struct Operand {
     static Operand unit() { return Operand{}; }
 };
 
-// ===========================================================================
-// Operations
-// ===========================================================================
-
 export enum class BinOp : std::uint8_t {
     Add, Sub, Mul, Div, Mod,
     Eq, NotEq, Lt, Gt, LtEq, GtEq,
-    // Concat — отдельно от Add: бэкенд знает, что это операция со строками.
+    // Concat живёт отдельно от Add — бэкенд по нему сразу понимает, что это строки.
     Concat,
 };
 
 export enum class UnOp : std::uint8_t { Neg, Not };
-
-// ===========================================================================
-// Instruction
-// ===========================================================================
 
 export enum class InstrKind : std::uint8_t {
     Move,         // dst = a
@@ -114,9 +104,9 @@ export enum class InstrKind : std::uint8_t {
     Goto,         // goto label
     Branch,       // if a goto label_then else label_else
     Return,       // return [a]
-    // A.2.14: указатели.
-    AddressOf,    // dst = &a            (a — Var/Temp, dst тип *T)
-    LoadPtr,      // dst = *a            (a — Pointer value)
+    // Работа с указателями
+    AddressOf,    // dst = &a            (a — Var/Temp, dst имеет тип *T)
+    LoadPtr,      // dst = *a            (a — указатель)
     StorePtr,     // *a = value_to_store
 };
 
@@ -146,43 +136,35 @@ export struct Instr {
     SourceLocation loc;
 };
 
-// ===========================================================================
-// Function / Module
-// ===========================================================================
-
 export struct IrParam {
     std::string name;
     std::string type_str;
 };
 
 export struct Function {
-    std::string name;            // плоское имя: 'main', 'Math.add', 'Point.get'
+    std::string name;            // плоское имя: main, Math.add, Point.get
     std::vector<IrParam> params;
     std::string return_type;
     std::vector<Instr> instrs;
     SourceLocation loc;
-    bool is_extern = false;       // A.3.12: внешняя C-функция, тело в C runtime
+    bool is_extern = false;       // внешняя C-функция, тело берётся из рантайма
 };
 
-// Описание struct-типа: имя + упорядоченный список полей (имя, тип-строка).
-// Нужен для бэкендов, которым требуется позиционная раскладка (LLVM).
+// Описание struct-типа: имя плюс упорядоченный список полей (имя, тип).
+// Нужно бэкендам, которым важна позиционная раскладка полей (LLVM).
 export struct StructDef {
     std::string name;
-    std::vector<std::pair<std::string, std::string>> fields;  // имя → строка-тип
+    std::vector<std::pair<std::string, std::string>> fields;  // имя → текст-тип
 };
 
 export struct Module {
     std::string name;
     std::vector<Function> functions;
     std::vector<StructDef> structs;
-    // Псевдонимы типов (`type Name = Target;`): кодген должен раскрывать их
-    // до примитива/массива/структуры. Хранятся плоско; для v1 этого хватает.
+    // Псевдонимы типов (type Name = Target;). Кодген должен раскрывать их до
+    // примитива, массива или структуры. Хранятся плоско, для v1 этого хватает.
     std::vector<std::pair<std::string, std::string>> type_aliases;
 };
-
-// ===========================================================================
-// Dump (текстовый вид)
-// ===========================================================================
 
 namespace {
 
@@ -354,9 +336,7 @@ export void dump_module(const Module& m, std::ostream& os) {
     }
 }
 
-// ===========================================================================
 // Lowerer: AST → IR
-// ===========================================================================
 
 export class Lowerer {
 public:
@@ -369,17 +349,15 @@ public:
 
     Module lower();
 
-    // Доступ к ещё-не-возвращённому списку структур (для тестов/отладки).
+    // Доступ к ещё не возвращённому списку структур (для тестов и отладки).
     const std::vector<StructDef>& structs() const noexcept { return struct_defs_; }
 
 private:
-    // --- декларации ---
     void lower_decls(const std::vector<std::unique_ptr<ast::Decl>>& decls,
                      const std::string& prefix);
     void lower_fn(const ast::FnDecl& fn, const std::string& flat_name);
     void lower_impl(const ast::ImplDecl& im);
 
-    // --- инструкции ---
     void lower_block(const ast::BlockStmt& b);
     void lower_stmt(const ast::Stmt& s);
     void lower_var_decl(const ast::VarDeclStmt& v);
@@ -388,7 +366,6 @@ private:
     void lower_if(const ast::IfStmt& s);
     void lower_while(const ast::WhileStmt& s);
 
-    // --- выражения ---
     Operand lower_expr(const ast::Expr& e);
     Operand lower_unary(const ast::UnaryExpr& u);
     Operand lower_binary(const ast::BinaryExpr& b);
@@ -398,7 +375,6 @@ private:
     Operand lower_array_lit(const ast::ArrayLit& a);
     Operand lower_struct_lit(const ast::StructLit& s);
 
-    // --- helpers ---
     Operand fresh_temp();
     std::string fresh_label();
     void emit(Instr i);
@@ -407,19 +383,17 @@ private:
     std::string ast_type_to_str(const ast::TypeExpr& te) const;
     sema::Type type_of(const ast::Expr& e) const;
 
-    // --- callee resolution ---
     struct CalleeInfo {
         enum class Kind { Function, Cast, BuiltinPrint, BuiltinInput,
                           BuiltinExit, BuiltinPanic, BuiltinAssert,
                           BuiltinLen, StaticMethod, InstanceMethod };
         Kind kind;
-        std::string flat_name;       // плоское имя для эмиссии Call
+        std::string flat_name;       // плоское имя, которое уйдёт в Call
         std::string cast_type;       // для Cast
-        const ast::Expr* self_expr = nullptr;  // для InstanceMethod (lower → self argument)
+        const ast::Expr* self_expr = nullptr;  // для метода: становится первым аргументом
     };
     CalleeInfo resolve_callee(const ast::Expr& callee);
 
-    // --- state ---
     const ast::Program& prog_;
     [[maybe_unused]] const sema::SemanticAnalyzer& sema_;
     const std::unordered_map<const ast::Expr*, sema::Type>& expr_types_;
@@ -437,10 +411,6 @@ private:
     struct LoopCtx { std::string break_label; std::string continue_label; };
     std::vector<LoopCtx> loops_;
 };
-
-// ===========================================================================
-// Implementation
-// ===========================================================================
 
 Module Lowerer::lower() {
     Module m;
@@ -463,10 +433,10 @@ void Lowerer::lower_decls(
             std::string sub_prefix = prefix.empty() ? ns->name : (prefix + "." + ns->name);
             lower_decls(ns->members, sub_prefix);
         } else if (auto* im = dynamic_cast<const ast::ImplDecl*>(d.get())) {
-            // Методы импла — на верхнем уровне (impl уровня namespace в v1 запрещён).
+            // Методы impl уходят на верхний уровень; impl внутри namespace в v1 запрещён.
             lower_impl(*im);
         } else if (auto* sd = dynamic_cast<const ast::StructDecl*>(d.get())) {
-            // Сохраняем позиционную раскладку для бэкендов (LLVM нужны индексы полей).
+            // Сохраняем позиционную раскладку полей: LLVM-бэкенду нужны их индексы.
             StructDef def;
             def.name = sd->name;
             def.fields.reserve(sd->fields.size());
@@ -477,7 +447,7 @@ void Lowerer::lower_decls(
         } else if (auto* ta = dynamic_cast<const ast::TypeAliasDecl*>(d.get())) {
             type_aliases_.emplace_back(ta->name, ast_type_to_str(*ta->target));
         }
-        // module / import не порождают IR-кода.
+        // module и import никаких инструкций в IR не дают
     }
 }
 
@@ -505,7 +475,6 @@ void Lowerer::lower_impl(const ast::ImplDecl& im) {
     }
 }
 
-// ---------------------------------------------------------------------------
 void Lowerer::lower_block(const ast::BlockStmt& b) {
     for (const auto& s : b.stmts) lower_stmt(*s);
 }
@@ -535,14 +504,14 @@ void Lowerer::lower_stmt(const ast::Stmt& s) {
     }
     if (dynamic_cast<const ast::EmptyStmt*>(&s)) return;
     if (auto* b = dynamic_cast<const ast::BlockStmt*>(&s)) { lower_block(*b); return; }
-    // Не должно встречаться — unsupported.
+    // Сюда нормально попадать не должны — неподдерживаемый узел.
 }
 
 void Lowerer::lower_var_decl(const ast::VarDeclStmt& v) {
     auto rhs = lower_expr(*v.init);
-    // Если RHS — NullC, а декларация указывает конкретный pointer type,
-    // вставим Cast, чтобы IR-тип переменной совпал с заявленным (иначе бэкенд
-    // увидит p:*void и сломается при разыменовании). См. A.2.14.
+    // Если справа NullC, а в объявлении указан конкретный pointer-тип,
+    // вставляем Cast, чтобы IR-тип переменной совпал с декларированным.
+    // Иначе бэкенд увидит p как *void и упадёт при разыменовании.
     if (rhs.kind == OperandKind::NullC && v.type
         && dynamic_cast<const ast::PointerType*>(v.type.get())) {
         auto cast_temp = fresh_temp();
@@ -562,7 +531,7 @@ void Lowerer::lower_var_decl(const ast::VarDeclStmt& v) {
 
 void Lowerer::lower_assign(const ast::AssignStmt& a) {
     auto rhs = lower_expr(*a.value);
-    // target формы: Ident | Field(Ident, name) | Index(Ident, expr) | глубже.
+    // Возможные формы target: Ident, Field, Index, Deref — или глубже вложенные.
     if (auto* id = dynamic_cast<const ast::IdentExpr*>(a.target.get())) {
         Instr i; i.kind = InstrKind::Move; i.dst = Operand::var(id->name);
         i.has_dst = true; i.a = rhs; i.loc = a.loc;
@@ -570,7 +539,7 @@ void Lowerer::lower_assign(const ast::AssignStmt& a) {
         return;
     }
     if (auto* fe = dynamic_cast<const ast::FieldExpr*>(a.target.get())) {
-        // x.field = rhs (только если x — Ident; иначе через временную)
+        // x.field = rhs работает, если x — Ident; для более сложного — через временную
         auto base = lower_expr(*fe->base);
         Instr i; i.kind = InstrKind::StoreField;
         i.a = base; i.field = fe->field; i.value_to_store = rhs; i.loc = a.loc;
@@ -585,7 +554,7 @@ void Lowerer::lower_assign(const ast::AssignStmt& a) {
         emit(std::move(i));
         return;
     }
-    // *p = rhs (A.2.14): запись через указатель.
+    // Запись через указатель: *p = rhs
     if (auto* de = dynamic_cast<const ast::DerefExpr*>(a.target.get())) {
         auto p = lower_expr(*de->operand);
         Instr i; i.kind = InstrKind::StorePtr;
@@ -593,7 +562,7 @@ void Lowerer::lower_assign(const ast::AssignStmt& a) {
         emit(std::move(i));
         return;
     }
-    // Не должно произойти — семантика проверила lvalue.
+    // Сюда не доберёмся — семантика уже проверила, что слева lvalue.
 }
 
 void Lowerer::lower_return(const ast::ReturnStmt& r) {
@@ -656,7 +625,6 @@ void Lowerer::lower_while(const ast::WhileStmt& s) {
     emit(std::move(endl));
 }
 
-// ---------------------------------------------------------------------------
 Operand Lowerer::lower_expr(const ast::Expr& e) {
     if (auto* il = dynamic_cast<const ast::IntLit*>(&e))    return Operand::int_c(il->value);
     if (auto* fl = dynamic_cast<const ast::FloatLit*>(&e))  return Operand::float_c(fl->value);
@@ -671,12 +639,12 @@ Operand Lowerer::lower_expr(const ast::Expr& e) {
     if (auto* c = dynamic_cast<const ast::CallExpr*>(&e))   return lower_call(*c);
     if (auto* a = dynamic_cast<const ast::ArrayLit*>(&e))   return lower_array_lit(*a);
     if (auto* s = dynamic_cast<const ast::StructLit*>(&e))  return lower_struct_lit(*s);
-    // A.2.14: указатели.
+    // Указатели
     if (dynamic_cast<const ast::NullLit*>(&e)) return Operand::null_c();
     if (auto* ao = dynamic_cast<const ast::AddressOfExpr*>(&e)) {
-        // Семантика гарантирует, что operand — Ident/Field/Index lvalue. Для MVP
-        // поддерживаем &Ident (адрес локальной переменной). Field/Index лоуэрим
-        // через временный alloca (на стороне LLVM).
+        // Семантика гарантировала, что operand — это Ident/Field/Index lvalue.
+        // Пока поддерживаем только &Ident (адрес локальной переменной); Field
+        // и Index лоуэрятся через временную allocaтуру на стороне LLVM.
         auto src = lower_expr(*ao->operand);
         auto dst = fresh_temp();
         Instr i; i.kind = InstrKind::AddressOf; i.dst = dst; i.has_dst = true;
@@ -964,7 +932,6 @@ Operand Lowerer::lower_struct_lit(const ast::StructLit& sl) {
     return dst;
 }
 
-// ---------------------------------------------------------------------------
 Operand Lowerer::fresh_temp() {
     return Operand::temp(next_temp_++);
 }
@@ -994,9 +961,7 @@ sema::Type Lowerer::type_of(const ast::Expr& e) const {
     return sema::Type(sema::Primitive::Void);  // shouldn't happen
 }
 
-// ===========================================================================
-// Constant folding + tiny DCE (B.2.2)
-// ===========================================================================
+// Constant folding и небольшая чистка мёртвого кода
 // SSA-предположение: temp'ы в Lowerer присваиваются один раз —
 // КРОМЕ short-circuit && / ||, где результат-temp присваивается дважды.
 // Поэтому propagation map для temp'ов инвалидируется при любом не-constant
@@ -1104,7 +1069,7 @@ std::optional<Operand> try_fold_cast(const std::string& target, const Operand& a
         if (a.kind == K::IntC)   return Operand::float_c(static_cast<double>(a.int_v));
         if (a.kind == K::FloatC) return Operand::float_c(a.float_v);
     }
-    // Int casts с truncation (semantics.md §6.4: wraparound).
+    // Целочисленные касты с truncation и wraparound.
     auto trunc_int = [&](const std::string& t, std::int64_t v) -> std::int64_t {
         if (t == "int8")   return static_cast<std::int8_t>(static_cast<std::uint8_t>(v));
         if (t == "int16")  return static_cast<std::int16_t>(static_cast<std::uint16_t>(v));
@@ -1151,7 +1116,7 @@ export void fold_constants_in_function(Function& fn) {
         if (ins.kind == InstrKind::StoreField || ins.kind == InstrKind::StoreIndex) {
             if (ins.a.kind == OperandKind::Var) var_mutated.insert(ins.a.str_v);
         }
-        // A.2.14: переменную, у которой взят адрес, нельзя свернуть в константу —
+        // Переменную, у которой взят адрес, нельзя сворачивать в константу:
         // через указатель её значение может меняться или адрес критичен сам по себе.
         if (ins.kind == InstrKind::AddressOf
             && ins.a.kind == OperandKind::Var) {

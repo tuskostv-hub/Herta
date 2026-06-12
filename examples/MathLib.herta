@@ -1,6 +1,4 @@
-// Мини-«std»: библиотечный модуль арифметических утилит на самом Herta.
-// Демонстрирует A.2.13 (модули) и A.3.6 (контроль видимости).
-// Не претендует на полный A.3.11 — для этого нужны generics/pointers/memory.
+// небольшая библиотека арифметических утилит на самом Herta
 
 module MathLib;
 
@@ -23,7 +21,7 @@ pub fn clamp(x: int32, lo: int32, hi: int32) int32 {
     return min(max(x, lo), hi);
 }
 
-// Приватная: используется внутри MathLib, не видна извне.
+// внутренний вспомогательный helper, не экспортируется
 fn pow_helper(base: int32, exp: int32, acc: int32) int32 {
     if exp == 0 { return acc; }
     return pow_helper(base, exp - 1, acc * base);
