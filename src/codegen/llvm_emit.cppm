@@ -390,12 +390,6 @@ int Emitter::field_index(const std::string& struct_name,
 
 std::string Emitter::mangle(std::size_t mod_idx, const std::string& fn_name) const {
     if (fn_name == "main") return "main";
-    // Для extern (C) функций имя оставляем как есть, без префикса модуля,
-    // чтобы линкер нашёл символ из libc (например printf).
-    if (auto it = mod_funcs_[mod_idx].find(fn_name);
-        it != mod_funcs_[mod_idx].end() && it->second->is_extern) {
-        return fn_name;
-    }
     return modules_[mod_idx].name + "." + fn_name;
 }
 
@@ -567,19 +561,6 @@ void Emitter::ensure_alloca_temp(FnState& st, std::int64_t id,
 }
 
 void Emitter::emit_function(std::size_t mod_idx, const ir::Function& fn) {
-    // Extern-функции эмитим как declare, без тела
-    if (fn.is_extern) {
-        auto canonical = mangle(mod_idx, fn.name);
-        out_ += std::format("declare {} @{}(",
-                             llvm_type(fn.return_type), canonical);
-        for (std::size_t i = 0; i < fn.params.size(); ++i) {
-            if (i) out_ += ", ";
-            out_ += llvm_type(fn.params[i].type_str);
-        }
-        out_ += ")\n\n";
-        return;
-    }
-
     FnState st;
     st.mod = &modules_[mod_idx];
     st.fn = &fn;
@@ -707,15 +688,6 @@ std::string Emitter::widen(FnState& st, const std::string& value,
     if (from_ty == to_ty) return value;
     auto a = parse_type(from_ty);
     auto b = parse_type(to_ty);
-
-    // На границе с C преобразуем string → *byte / *void:
-    // вытаскиваем поле .data из герта-строки.
-    if (a.kind == TypeInfo::Kind::String && b.kind == TypeInfo::Kind::Pointer) {
-        auto v = fresh_ssa(st);
-        st.body += std::format(
-            "  {} = extractvalue %struct.herta_string {}, 1\n", v, value);
-        return v;
-    }
 
     // Указатель в указатель: в LLVM это opaque ptr, никаких инструкций не нужно.
     if (a.kind == TypeInfo::Kind::Pointer && b.kind == TypeInfo::Kind::Pointer) {

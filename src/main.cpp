@@ -21,7 +21,6 @@ struct CliArgs {
     bool dump_ast = false;
     bool dump_ir = false;
     bool emit_llvm = false;
-    bool no_opt = false;
     bool run_after = false; // собрать бинарь и сразу запустить его
 };
 
@@ -33,7 +32,6 @@ void print_usage(std::ostream& os) {
         "  --dump-ast      print AST and exit\n"
         "  --dump-ir       print three-address IR and exit\n"
         "  --emit-llvm     emit LLVM IR (.ll) to stdout and exit\n"
-        "  --no-opt        disable IR optimizations (constant folding + DCE)\n"
         "  --run           compile to binary, run it, exit with its code\n";
 }
 
@@ -45,7 +43,6 @@ std::expected<CliArgs, std::string> parse_args(int argc, char** argv) {
         else if (s == "--dump-ast") a.dump_ast = true;
         else if (s == "--dump-ir") a.dump_ir = true;
         else if (s == "--emit-llvm") a.emit_llvm = true;
-        else if (s == "--no-opt") a.no_opt = true;
         else if (s == "--run") a.run_after = true;
         else if (s == "-o") {
             if (i + 1 >= argc) return std::unexpected("missing value for -o");
@@ -115,7 +112,6 @@ int main(int argc, char** argv) {
 
     // Полный pipeline проходит через driver
     herta::driver::Driver driver(sink);
-    driver.set_optimize(!args->no_opt);
     if (!driver.compile(args->input) || sink.has_errors()) {
         sink.print_all(std::cerr);
         return 1;

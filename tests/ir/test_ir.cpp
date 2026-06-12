@@ -26,9 +26,8 @@ void fail(std::string_view test, std::string_view detail) {
 }
 
 // Лоуэрит source и возвращает текстовый дамп IR (или пустую строку при ошибке).
-// optimize=true → запустить constant folding + DCE.
 std::string lower(std::string_view source, std::string_view test_name,
-                  bool require_main = false, bool optimize = false) {
+                  bool require_main = false) {
     auto src = SourceFile{std::string(test_name), std::string(source)};
     DiagnosticSink sink;
     Lexer lex(src, sink);
@@ -54,7 +53,6 @@ std::string lower(std::string_view source, std::string_view test_name,
     }
     Lowerer lw(*prog, sema);
     auto mod = lw.lower();
-    if (optimize) herta::ir::optimize_module(mod);
     std::ostringstream out;
     herta::ir::dump_module(mod, out);
     return out.str();
@@ -231,124 +229,6 @@ void test_string_concat() {
     contains("concat", ir, "concat ");
 }
 
-// Тесты оптимизатора: constant folding, propagation, DCE.
-
-void test_fold_int_arith() {
-    auto ir = lower(R"(
-        module m;
-        fn f() int32 { return 1 + 2 * 3 - 4; }
-    )", "fold_int", /*main=*/false, /*opt=*/true);
-    // 1 + 6 - 4 = 3 — должен остаться только return 3
-    contains("fold_int", ir, "return 3");
-    not_contains("fold_int", ir, "add ");
-    not_contains("fold_int", ir, "mul ");
-    not_contains("fold_int", ir, "sub ");
-}
-
-void test_fold_comparison() {
-    auto ir = lower(R"(
-        module m;
-        fn f() bool { return 5 < 10; }
-    )", "fold_cmp", /*main=*/false, /*opt=*/true);
-    contains("fold_cmp", ir, "return true");
-    not_contains("fold_cmp", ir, "lt ");
-}
-
-void test_fold_div_by_zero_not_folded() {
-    auto ir = lower(R"(
-        module m;
-        fn f() int32 { return 10 / 0; }
-    )", "fold_div0", /*main=*/false, /*opt=*/true);
-    // Деление на ноль не сворачивается, оно должно дойти до рантайма как ошибка.
-    contains("fold_div0", ir, "div 10, 0");
-}
-
-void test_fold_unary_neg() {
-    auto ir = lower(R"(
-        module m;
-        fn f() int32 { return -5; }
-    )", "fold_neg", /*main=*/false, /*opt=*/true);
-    contains("fold_neg", ir, "return -5");
-    not_contains("fold_neg", ir, "neg ");
-}
-
-void test_fold_logical_not() {
-    auto ir = lower(R"(
-        module m;
-        fn f() bool { return !true; }
-    )", "fold_not", /*main=*/false, /*opt=*/true);
-    contains("fold_not", ir, "return false");
-    not_contains("fold_not", ir, "not ");
-}
-
-void test_fold_branch_with_true() {
-    auto ir = lower(R"(
-        module m;
-        fn f() int32 {
-            if true { return 1; } else { return 2; }
-        }
-    )", "fold_br_true", /*main=*/false, /*opt=*/true);
-    // Branch с константой true → Goto на then.
-    not_contains("fold_br_true", ir, "if ");
-    contains("fold_br_true", ir, "goto L");
-}
-
-void test_propagate_let_const() {
-    auto ir = lower(R"(
-        module m;
-        fn f() int32 {
-            let x: int32 = 42;
-            let y: int32 = x + 8;
-            return y;
-        }
-    )", "prop_let", /*main=*/false, /*opt=*/true);
-    contains("prop_let", ir, "return 50");
-}
-
-void test_dce_removes_unused_temp() {
-    auto ir = lower(R"(
-        module m;
-        fn f() int32 {
-            let unused: int32 = 1 + 2;
-            return 0;
-        }
-    )", "dce_unused", /*main=*/false, /*opt=*/true);
-    // 1+2=3, потом x=3, потом x не используется — DCE удаляет.
-    not_contains("dce_unused", ir, "unused");
-    contains("dce_unused", ir, "return 0");
-}
-
-void test_fold_cast_int_to_float() {
-    auto ir = lower(R"(
-        module m;
-        fn f() float64 { return float64(5); }
-    )", "fold_cast", /*main=*/false, /*opt=*/true);
-    not_contains("fold_cast", ir, "cast ");
-    contains("fold_cast", ir, "return 5");
-}
-
-void test_fold_string_concat() {
-    auto ir = lower(R"(
-        module m;
-        fn f() string { return "ab" + "cd"; }
-    )", "fold_concat", /*main=*/false, /*opt=*/true);
-    not_contains("fold_concat", ir, "concat ");
-    contains("fold_concat", ir, "return \"abcd\"");
-}
-
-void test_var_reassigned_not_propagated() {
-    auto ir = lower(R"(
-        module m;
-        fn f() int32 {
-            var x: int32 = 5;
-            x = x + 1;
-            return x;
-        }
-    )", "var_reassign", /*main=*/false, /*opt=*/true);
-    // x присваивается дважды (5, потом x+1) → не пропагируется.
-    // В IR должны остаться обращения к x.
-    contains("var_reassign", ir, " x");
-}
 
 void test_void_call_no_dst() {
     auto ir = lower(R"(
@@ -377,19 +257,6 @@ int main() {
     test_namespace_call();
     test_string_concat();
     test_void_call_no_dst();
-
-    // optimizer
-    test_fold_int_arith();
-    test_fold_comparison();
-    test_fold_div_by_zero_not_folded();
-    test_fold_unary_neg();
-    test_fold_logical_not();
-    test_fold_branch_with_true();
-    test_propagate_let_const();
-    test_dce_removes_unused_temp();
-    test_fold_cast_int_to_float();
-    test_fold_string_concat();
-    test_var_reassigned_not_propagated();
 
     if (failures == 0) {
         std::cout << "all IR tests passed\n";

@@ -39,7 +39,6 @@ export enum class TokenKind : std::uint8_t {
     KwTrue,
     KwFalse,
     KwNull,    // нулевой указатель
-    KwExtern,  // объявление функции из libc
 
     // Арифметика
     Plus, Minus, Star, Slash, Percent,
@@ -163,7 +162,6 @@ constexpr KeywordEntry kKeywords[] = {
     {"true",      TokenKind::KwTrue},
     {"false",     TokenKind::KwFalse},
     {"null",      TokenKind::KwNull},
-    {"extern",    TokenKind::KwExtern},
 };
 
 TokenKind keyword_lookup(std::string_view text) noexcept {
@@ -203,7 +201,6 @@ std::string_view to_string(TokenKind k) noexcept {
         case TokenKind::KwTrue: return "KwTrue";
         case TokenKind::KwFalse: return "KwFalse";
         case TokenKind::KwNull: return "KwNull";
-        case TokenKind::KwExtern: return "KwExtern";
         case TokenKind::Amp: return "Amp";
         case TokenKind::Plus: return "Plus";
         case TokenKind::Minus: return "Minus";

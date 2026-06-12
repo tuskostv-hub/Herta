@@ -459,13 +459,11 @@ export struct FnDecl : Decl {
     std::string name;
     std::vector<Param> params;
     std::unique_ptr<TypeExpr> return_type;
-    std::unique_ptr<BlockStmt> body;  // nullptr у extern-функций
-    bool is_extern = false;            // у extern fn есть только сигнатура
+    std::unique_ptr<BlockStmt> body;
 
     void dump(std::ostream& os, int level) const override {
         indent(os, level);
-        os << (is_pub ? "pub " : "") << (is_extern ? "extern " : "")
-           << "Fn '" << name << "'\n";
+        os << (is_pub ? "pub " : "") << "Fn '" << name << "'\n";
         if (!params.empty()) {
             indent(os, level + 1); os << "params:\n";
             for (const auto& p : params) {

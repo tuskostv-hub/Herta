@@ -12,7 +12,6 @@ Herta — **компилятор в нативный код**: текстовы�
    → [Парсер]            → AST
    → [Семантика]         → аннотированный AST
    → [Lowering]          → трёхадресный IR              ← herta.ir
-   → [Optimizer]         → constant folding + DCE       ← herta.ir
    → [LLVM emitter]      → текстовый LLVM IR (.ll)      ← herta.llvm
    → clang -O1           → нативный x86-64 ELF
 ```
@@ -26,9 +25,6 @@ Herta — **компилятор в нативный код**: текстовы�
   CMake-конфиг не нужны: компилятор пишет `.ll` как строку и зовёт clang
   через `popen`. Проще читать и отлаживать (можно глазами посмотреть `.ll`
   через `--emit-llvm`).
-- **Совместимость с C ABI бесплатно.** Это открывает FFI (A.3.12): любая
-  C-функция, объявленная как `extern fn`, линкуется напрямую с libc.
-
 ## Модуль эмиттера
 
 [`src/codegen/llvm_emit.cppm`](../src/codegen/llvm_emit.cppm) принимает
@@ -124,9 +120,7 @@ exit 1):
 
 ### Имена функций и кросс-модульные вызовы
 
-Все функции получают имя `@<Module>.<flat>`, кроме `main` (`@main`) и
-**extern fn** — у них имя без префикса модуля (`@puts`, `@printf`), чтобы
-линкер связал с реальной libc по System V ABI.
+Все функции получают имя `@<Module>.<flat>`, кроме `main` (`@main`).
 
 ### Псевдонимы типов
 
@@ -134,7 +128,7 @@ exit 1):
 Перед эмиссией собирается плоская таблица алиасов из всех модулей; типы
 во всех инструкциях IR раскрываются рекурсивно (включая элементы массивов).
 
-### Указатели и FFI (A.2.14 / A.3.7 / A.3.12)
+### Указатели (A.2.18 / A.3.9)
 
 | Конструкция | LLVM IR |
 |-------------|---------|
@@ -143,13 +137,6 @@ exit 1):
 | `*p`        | `load <T>, ptr %p` + runtime null-check |
 | `*p = v`    | runtime null-check + `store <T> %v, ptr %p` |
 | `null`      | LLVM `null` константа |
-| `extern fn` | `declare <ret> @<name>(<params>)` — имя без префикса модуля |
-| `string → *byte` | автоматический `extractvalue %struct.herta_string, 1` |
-
-**Конверсия `string → *byte`** для FFI: строковая константа Herta —
-`%struct.herta_string = type { i64 len, ptr data }`, причём `@.str.N`
-null-терминированы. При вызове `extern fn puts(s: *byte)` эмиттер
-автоматически извлекает поле `.data` (`extractvalue` index 1).
 
 ## Точка входа CLI
 
@@ -165,5 +152,4 @@ myc <source.herta> [options]
 | `--emit-llvm`     | вывести `.ll` в stdout и выйти                        |
 | `--dump-tokens`   | поток токенов                                         |
 | `--dump-ast`      | AST                                                   |
-| `--dump-ir`       | трёхадресный IR (после оптимизаций, если не `--no-opt`) |
-| `--no-opt`        | отключить оптимизации IR (constant folding + DCE)     |
+| `--dump-ir`       | трёхадресный IR                                       |

@@ -41,7 +41,7 @@ private:
     bool parse_module_header(ast::Program& prog);
     bool parse_imports(ast::Program& prog);
     std::unique_ptr<ast::Decl> parse_top_level();
-    std::unique_ptr<ast::FnDecl> parse_fn_decl(bool is_extern = false);
+    std::unique_ptr<ast::FnDecl> parse_fn_decl();
     std::unique_ptr<ast::StructDecl> parse_struct_decl();
     std::unique_ptr<ast::TypeAliasDecl> parse_type_alias_decl();
     std::unique_ptr<ast::NamespaceDecl> parse_namespace_decl();
@@ -332,18 +332,6 @@ std::unique_ptr<ast::Decl> Parser::parse_top_level() {
     std::unique_ptr<ast::Decl> d;
     switch (current().kind) {
         case TokenKind::KwFn:        d = parse_fn_decl(); break;
-        case TokenKind::KwExtern: {
-            // extern fn name(args) ret; — объявление без тела
-            advance();  // 'extern'
-            if (!check(TokenKind::KwFn)) {
-                error("'extern' must be followed by 'fn'");
-                return nullptr;
-            }
-            auto fn = parse_fn_decl(/*is_extern=*/true);
-            if (!fn) return nullptr;
-            d = std::move(fn);
-            break;
-        }
         case TokenKind::KwStruct:    d = parse_struct_decl(); break;
         case TokenKind::KwType:      d = parse_type_alias_decl(); break;
         case TokenKind::KwNamespace: d = parse_namespace_decl(); break;
@@ -372,7 +360,7 @@ std::unique_ptr<ast::Decl> Parser::parse_top_level() {
     return d;
 }
 
-std::unique_ptr<ast::FnDecl> Parser::parse_fn_decl(bool is_extern) {
+std::unique_ptr<ast::FnDecl> Parser::parse_fn_decl() {
     auto start = current().loc;
     advance();  // 'fn'
 
@@ -409,14 +397,8 @@ std::unique_ptr<ast::FnDecl> Parser::parse_fn_decl(bool is_extern) {
     auto ret_type = parse_type_expr();
     if (!ret_type) return nullptr;
 
-    std::unique_ptr<ast::BlockStmt> body;
-    if (is_extern) {
-        if (!expect(TokenKind::Semicolon, "';' after extern fn declaration"))
-            return nullptr;
-    } else {
-        body = parse_block();
-        if (!body) return nullptr;
-    }
+    auto body = parse_block();
+    if (!body) return nullptr;
 
     auto fn = std::make_unique<ast::FnDecl>();
     fn->loc = start;
@@ -424,7 +406,6 @@ std::unique_ptr<ast::FnDecl> Parser::parse_fn_decl(bool is_extern) {
     fn->params = std::move(params);
     fn->return_type = std::move(ret_type);
     fn->body = std::move(body);
-    fn->is_extern = is_extern;
     return fn;
 }
 

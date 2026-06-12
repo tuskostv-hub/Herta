@@ -37,23 +37,18 @@ public:
     // в порядке зависимостей. true при успехе.
     bool compile(const std::filesystem::path& root_file);
 
-    // Управление оптимизациями IR (constant folding и DCE).
-    // По умолчанию включены, флаг --no-opt их отключает.
-    void set_optimize(bool on) noexcept { optimize_ = on; }
-
     // Печатает IR всех модулей в топологическом порядке.
     // Звать после успешного compile().
     void dump_ir(std::ostream& os) const;
 
-    // Лоуэрит все модули в IR (с оптимизациями, если они включены) и
-    // возвращает их в топологическом порядке. Звать после compile().
+    // Лоуэрит все модули в IR и возвращает их в топологическом порядке.
+    // Звать после compile().
     std::vector<herta::ir::Module> lower_all() const;
 
 private:
     bool load_recursive(const std::filesystem::path& path);
 
     DiagnosticSink& sink_;
-    bool optimize_ = true;
     std::filesystem::path search_dir_;
     // Топологический порядок: листья дерева зависимостей идут первыми.
     std::vector<std::unique_ptr<LoadedModule>> modules_;
@@ -111,7 +106,6 @@ std::vector<herta::ir::Module> Driver::lower_all() const {
         if (!mod->sema) continue;
         herta::ir::Lowerer lower(*mod->program, *mod->sema);
         auto ir_mod = lower.lower();
-        if (optimize_) herta::ir::optimize_module(ir_mod);
         result.push_back(std::move(ir_mod));
     }
     return result;

@@ -266,7 +266,6 @@ export struct Symbol {
     Type type;
     bool is_mutable = false;
     bool is_pub = false;
-    bool is_extern = false;  // внешняя C-функция, тела нет
     std::vector<Type> param_types;
     std::shared_ptr<Scope> ns_scope;  // Namespace / Module
 };
@@ -582,7 +581,6 @@ bool SemanticAnalyzer::process_type_alias(const ast::TypeAliasDecl& ad,
 bool SemanticAnalyzer::process_fn_signature(const ast::FnDecl& fd, Scope& target) {
     Symbol s; s.kind = Symbol::Kind::Fn; s.name = fd.name; s.loc = fd.loc;
     s.is_pub = fd.is_pub;
-    s.is_extern = fd.is_extern;
     for (const auto& p : fd.params) {
         auto t = resolve_type(*p.type, target);
         if (!t) return false;
@@ -603,8 +601,6 @@ bool SemanticAnalyzer::process_fn_signature(const ast::FnDecl& fd, Scope& target
 }
 
 bool SemanticAnalyzer::process_fn_body(const ast::FnDecl& fd, Scope& target) {
-    // extern fn — только сигнатура, тела нет
-    if (fd.is_extern) return true;
     auto sym = target.lookup_local(fd.name);
     if (!sym) return true;  // ошибка уже была
     auto saved_ret = current_return_type_;
@@ -990,7 +986,7 @@ std::optional<Type> SemanticAnalyzer::check_expr(const ast::Expr& e, Scope& scop
             auto sym = scope.lookup(id->name);
             if (sym && sym->kind == Symbol::Kind::Fn) {
                 error(ao->loc,
-                      "function pointers are not yet supported (use extern fn / direct call)");
+                      "function pointers are not yet supported (use direct call)");
                 return std::nullopt;
             }
         }

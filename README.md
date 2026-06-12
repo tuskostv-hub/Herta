@@ -40,8 +40,7 @@ cmake --build build
 ./build/myc <source.herta> --emit-llvm    # вывести .ll в stdout
 ./build/myc <source.herta> --dump-tokens  # поток токенов
 ./build/myc <source.herta> --dump-ast     # AST
-./build/myc <source.herta> --dump-ir      # трёхадресный IR (после оптимизаций)
-./build/myc <source.herta> --dump-ir --no-opt   # … без constant folding / DCE
+./build/myc <source.herta> --dump-ir      # трёхадресный IR
 ```
 
 Код завершения исполненной программы — значение, возвращённое из `main`.
