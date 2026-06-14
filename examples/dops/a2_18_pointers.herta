@@ -1,0 +1,51 @@
+// A.2.18 Указатели.
+// *T — тип указателя на T. & берёт адрес lvalue. * разыменовывает (и сам тоже lvalue).
+// null литерал имеет тип *void, приводится к любому *T.
+// Перед разыменованием null рантайм проверяет указатель и роняет программу.
+
+module a2_18_pointers;
+
+// Принимаем указатель и меняем через него: вызывающий увидит изменения.
+fn set_value(p: *int32, v: int32) void {
+    *p = v;
+    return;
+}
+
+fn swap_via_ptr(a: *int32, b: *int32) void {
+    let tmp: int32 = *a;
+    *a = *b;
+    *b = tmp;
+    return;
+}
+
+fn main() int32 {
+    // Адрес и разыменование
+    var x: int32 = 10;
+    let px: *int32 = &x;
+    assert(*px == 10);
+
+    // Запись через *
+    *px = 42;
+    assert(x == 42);
+
+    // Изменение через функцию
+    set_value(&x, 99);
+    assert(x == 99);
+
+    // Обмен значений через указатели
+    var a: int32 = 1;
+    var b: int32 = 2;
+    swap_via_ptr(&a, &b);
+    assert(a == 2);
+    assert(b == 1);
+
+    // null литерал имеет тип *void, но приводится к *int32.
+    let p_null: *int32 = null;
+
+    print(*px);
+    print(a);
+    print(b);
+
+    print("a2.18 ok");
+    return 0;
+}

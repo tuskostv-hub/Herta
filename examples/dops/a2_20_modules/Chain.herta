@@ -1,0 +1,9 @@
+// Транзитивный импорт: Chain → Math.
+
+module Chain;
+
+import Math;
+
+pub fn add_one(x: int32) int32 {
+    return Math.add(x, 1);
+}

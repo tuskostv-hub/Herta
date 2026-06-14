@@ -1,0 +1,11 @@
+// Второй модуль — рядом с Math. Импортирующий main подтянет оба.
+
+module Strings;
+
+pub fn greet(name: string) string {
+    return "hi, " + name + "!";
+}
+
+pub fn shout(s: string) string {
+    return s + " !!!";
+}

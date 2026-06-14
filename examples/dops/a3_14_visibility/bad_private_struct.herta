@@ -1,0 +1,14 @@
+// Демонстрация: обращение к приватной структуре другого модуля даёт
+// ошибку компиляции.
+//
+// Ожидаемая ошибка при компиляции:
+//   error: 'Hidden' is not exported from module 'Lib'
+
+module bad_private_struct;
+
+import Lib;
+
+fn main() int32 {
+    let h: int32 = Lib.Hidden(0);
+    return 0;
+}

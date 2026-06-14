@@ -1,0 +1,16 @@
+// Math: библиотечный модуль. Каждый pub-символ виден импортирующим.
+
+module Math;
+
+pub fn add(a: int32, b: int32) int32 {
+    return a + b;
+}
+
+pub fn mul(a: int32, b: int32) int32 {
+    return a * b;
+}
+
+// Без pub — не экспортируется.
+fn internal_helper() int32 {
+    return 42;
+}

@@ -1,0 +1,14 @@
+// Демонстрация: обращение к приватной функции другого модуля даёт
+// ошибку компиляции "is not exported from module 'Lib'".
+//
+// Ожидаемая ошибка при компиляции:
+//   error: 'secret_helper' is not exported from module 'Lib'
+
+module bad_private_fn;
+
+import Lib;
+
+fn main() int32 {
+    let x: int32 = Lib.secret_helper(5);
+    return x;
+}

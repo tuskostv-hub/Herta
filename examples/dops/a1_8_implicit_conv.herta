@@ -1,0 +1,65 @@
+// A.1.8 Неявное приведение типов (widening).
+// Числовые типы расширяются автоматически по правилам types.md §5.4:
+//   - знаковый → знаковый шире (i8→i16→i32→i64)
+//   - беззнаковый → беззнаковый шире
+//   - беззнаковый → знаковый шире (u8→i16)
+//   - любой целый → float64
+//   - float32 → float64
+
+module a1_8_implicit_conv;
+
+fn takes_i64(x: int64) int32 {
+    print(x);
+    return 0;
+}
+
+fn takes_f64(x: float64) int32 {
+    print(x);
+    return 0;
+}
+
+fn main() int32 {
+    // i8 → i16 (передача аргументом)
+    let small: int8 = 7;
+    let wider: int16 = small;
+    assert(wider == 7);
+    print(wider);
+
+    // i16 → i32 (присваивание)
+    let v16: int16 = 1000;
+    let v32: int32 = v16;
+    assert(v32 == 1000);
+
+    // i32 → i64 (через аргумент)
+    let v: int32 = 12345;
+    takes_i64(v);
+
+    // u8 → i16 (беззнаковый в знаковый шире)
+    let u: uint8 = 200;
+    let s: int16 = u;
+    assert(s == 200);
+
+    // u8 → u32 (внутри беззнаковых)
+    let ww: uint32 = u;
+    print(ww);
+
+    // int → float
+    takes_f64(42);
+    let pi_int: int32 = 314;
+    let pi_f: float64 = pi_int;
+    print(pi_f);
+
+    // float32 → float64
+    let f: float32 = 2.5;
+    let fd: float64 = f;
+    print(fd);
+
+    // Арифметика разной ширины: результат шире
+    let a: int16 = 1;
+    let b: int32 = 2;
+    let sum: int32 = a + b;
+    assert(sum == 3);
+
+    print("a1.8 ok");
+    return 0;
+}

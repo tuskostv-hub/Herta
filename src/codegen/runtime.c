@@ -4,10 +4,12 @@
 // Память: строковые буферы выделяются через malloc и не освобождаются
 // (используется арена-модель).
 
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef struct {
     int64_t len;
@@ -104,9 +106,82 @@ herta_string herta_input(void) {
     return r;
 }
 
+// Конверсии числа ↔ строка.
+//
+// *_to_string возвращают свежий буфер (живёт до конца программы — арена).
+// parse_* возвращают 1, если разбор удался полностью (вся строка — число),
+// и 0 иначе. На неудаче *out не трогается, поэтому язык может задать
+// значение по умолчанию заранее.
+
+static herta_string make_owned_string(const char* buf, int64_t n) {
+    char* copy = (char*)malloc((size_t)n + 1);
+    if (n) memcpy(copy, buf, (size_t)n);
+    copy[n] = '\0';
+    herta_string r = { n, copy };
+    return r;
+}
+
+herta_string herta_int_to_string(int64_t v) {
+    char buf[32];
+    int n = snprintf(buf, sizeof(buf), "%lld", (long long)v);
+    return make_owned_string(buf, n);
+}
+
+herta_string herta_float_to_string(double v) {
+    char buf[64];
+    int n;
+    if (isnan(v))      n = snprintf(buf, sizeof(buf), "nan");
+    else if (isinf(v)) n = snprintf(buf, sizeof(buf), v < 0 ? "-inf" : "inf");
+    else               n = snprintf(buf, sizeof(buf), "%g", v);
+    return make_owned_string(buf, n);
+}
+
+int32_t herta_parse_int(herta_string s, int64_t* out) {
+    if (s.len == 0) return 0;
+    // strtoll нужен 0-терминатор: копируем во временный буфер
+    char small[64];
+    char* tmp = (s.len < (int64_t)sizeof(small)) ? small
+                                                 : (char*)malloc((size_t)s.len + 1);
+    memcpy(tmp, s.data, (size_t)s.len);
+    tmp[s.len] = '\0';
+    char* end = NULL;
+    long long v = strtoll(tmp, &end, 10);
+    int ok = (end != NULL) && (*end == '\0');
+    if (tmp != small) free(tmp);
+    if (!ok) return 0;
+    *out = (int64_t)v;
+    return 1;
+}
+
+int32_t herta_parse_float(herta_string s, double* out) {
+    if (s.len == 0) return 0;
+    char small[64];
+    char* tmp = (s.len < (int64_t)sizeof(small)) ? small
+                                                 : (char*)malloc((size_t)s.len + 1);
+    memcpy(tmp, s.data, (size_t)s.len);
+    tmp[s.len] = '\0';
+    char* end = NULL;
+    double v = strtod(tmp, &end);
+    int ok = (end != NULL) && (*end == '\0');
+    if (tmp != small) free(tmp);
+    if (!ok) return 0;
+    *out = v;
+    return 1;
+}
+
 void herta_exit(int64_t code) {
     fflush(stdout);
     exit((int)code);
+}
+
+// Спит указанное число миллисекунд. Реализована через nanosleep,
+// поэтому не блокирует CPU на 100% (в отличие от busy-цикла).
+void herta_sleep_ms(int64_t ms) {
+    if (ms <= 0) return;
+    struct timespec ts;
+    ts.tv_sec = (time_t)(ms / 1000);
+    ts.tv_nsec = (long)((ms % 1000) * 1000000L);
+    nanosleep(&ts, NULL);
 }
 
 void herta_panic(herta_string msg) {

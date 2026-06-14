@@ -1,0 +1,35 @@
+// A.2.20 Модули.
+// Каждый .herta файл — отдельный модуль. Имя файла обязано совпадать с
+// заголовком `module Name;`. Импорт через `import Name;` подтягивает
+// соседний файл из той же папки. Driver рекурсивно загружает зависимости,
+// проверяет циклы и отрабатывает фазы в топологическом порядке.
+
+module a2_20_modules;
+
+import Math;
+import Strings;
+import Chain;
+
+fn main() int32 {
+    // Прямой вызов pub-функции из импортированного модуля.
+    let s: int32 = Math.add(2, 3);
+    assert(s == 5);
+    print(s);
+
+    let p: int32 = Math.mul(4, 5);
+    assert(p == 20);
+    print(p);
+
+    // Второй независимый модуль.
+    let g: string = Strings.greet("Herta");
+    print(g);
+    print(Strings.shout("kuru"));
+
+    // Транзитивный импорт: Chain зависит от Math.
+    let r: int32 = Chain.add_one(10);
+    assert(r == 11);
+    print(r);
+
+    print("a2.20 ok");
+    return 0;
+}

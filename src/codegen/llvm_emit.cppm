@@ -351,6 +351,11 @@ void Emitter::emit_runtime_decls() {
             "%struct.herta_string, %struct.herta_string)\n"
         "declare i8 @herta_string_eq(%struct.herta_string, %struct.herta_string)\n"
         "declare %struct.herta_string @herta_input()\n"
+        "declare void @herta_sleep_ms(i64)\n"
+        "declare %struct.herta_string @herta_int_to_string(i64)\n"
+        "declare %struct.herta_string @herta_float_to_string(double)\n"
+        "declare i32 @herta_parse_int(%struct.herta_string, i64*)\n"
+        "declare i32 @herta_parse_float(%struct.herta_string, double*)\n"
         "declare void @herta_exit(i64) noreturn\n"
         "declare void @herta_panic(%struct.herta_string) noreturn\n"
         "declare void @herta_assert_fail(i64) noreturn\n"
@@ -481,8 +486,15 @@ void Emitter::infer_types(FnState& st) {
             case IK::Call: {
                 if (ins.callee == "len") { set_dst("int64"); break; }
                 if (ins.callee == "input") { set_dst("string"); break; }
+                if (ins.callee == "inf" || ins.callee == "nan") { set_dst("float64"); break; }
+                if (ins.callee == "int_to_string" || ins.callee == "float_to_string") {
+                    set_dst("string"); break;
+                }
+                if (ins.callee == "parse_int") { set_dst("int64"); break; }
+                if (ins.callee == "parse_float") { set_dst("float64"); break; }
                 if (ins.callee == "print" || ins.callee == "exit"
-                 || ins.callee == "panic" || ins.callee == "assert") break;
+                 || ins.callee == "panic" || ins.callee == "assert"
+                 || ins.callee == "sleep_ms") break;
                 auto caller_mod = static_cast<std::size_t>(st.mod - modules_.data());
                 std::size_t target_mod = 0;
                 auto canonical = resolve_callee(caller_mod, ins.callee, target_mod);
@@ -1162,6 +1174,12 @@ void Emitter::emit_call(FnState& st, const ir::Instr& ins) {
         if (ins.has_dst) store_to(st, ins.dst, r, "string");
         return;
     }
+    if (name == "sleep_ms") {
+        auto [v, ty] = args[0];
+        auto vw = widen(st, v, ty, "int64");
+        st.body += std::format("  call void @herta_sleep_ms(i64 {})\n", vw);
+        return;
+    }
     if (name == "exit") {
         auto [v, ty] = args[0];
         auto vw = widen(st, v, ty, "int64");
@@ -1201,6 +1219,61 @@ void Emitter::emit_call(FnState& st, const ir::Instr& ins) {
             if (ins.has_dst)
                 store_to(st, ins.dst, std::to_string(ti.array_size), "int64");
         }
+        return;
+    }
+    if (name == "inf") {
+        if (ins.has_dst) store_to(st, ins.dst, "0x7FF0000000000000", "float64");
+        return;
+    }
+    if (name == "nan") {
+        if (ins.has_dst) store_to(st, ins.dst, "0x7FF8000000000000", "float64");
+        return;
+    }
+    if (name == "int_to_string") {
+        auto [v, ty] = args[0];
+        auto vw = widen(st, v, ty, "int64");
+        auto r = fresh_ssa(st);
+        st.body += std::format(
+            "  {} = call %struct.herta_string @herta_int_to_string(i64 {})\n", r, vw);
+        if (ins.has_dst) store_to(st, ins.dst, r, "string");
+        return;
+    }
+    if (name == "float_to_string") {
+        auto [v, ty] = args[0];
+        auto vw = widen(st, v, ty, "float64");
+        auto r = fresh_ssa(st);
+        st.body += std::format(
+            "  {} = call %struct.herta_string @herta_float_to_string(double {})\n", r, vw);
+        if (ins.has_dst) store_to(st, ins.dst, r, "string");
+        return;
+    }
+    if (name == "parse_int") {
+        // На неуспехе оставим 0; runtime возвращает 1/0, мы игнорируем.
+        auto [v, ty] = args[0];
+        auto slot = fresh_ssa(st);
+        st.body += std::format("  {} = alloca i64\n", slot);
+        st.body += std::format("  store i64 0, i64* {}\n", slot);
+        auto ignored = fresh_ssa(st);
+        st.body += std::format(
+            "  {} = call i32 @herta_parse_int(%struct.herta_string {}, i64* {})\n",
+            ignored, v, slot);
+        auto r = fresh_ssa(st);
+        st.body += std::format("  {} = load i64, i64* {}\n", r, slot);
+        if (ins.has_dst) store_to(st, ins.dst, r, "int64");
+        return;
+    }
+    if (name == "parse_float") {
+        auto [v, ty] = args[0];
+        auto slot = fresh_ssa(st);
+        st.body += std::format("  {} = alloca double\n", slot);
+        st.body += std::format("  store double 0.0, double* {}\n", slot);
+        auto ignored = fresh_ssa(st);
+        st.body += std::format(
+            "  {} = call i32 @herta_parse_float(%struct.herta_string {}, double* {})\n",
+            ignored, v, slot);
+        auto r = fresh_ssa(st);
+        st.body += std::format("  {} = load double, double* {}\n", r, slot);
+        if (ins.has_dst) store_to(st, ins.dst, r, "float64");
         return;
     }
 

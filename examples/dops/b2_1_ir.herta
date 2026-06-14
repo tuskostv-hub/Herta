@@ -1,0 +1,64 @@
+// B.2.1 Промежуточное представление (IR).
+// Перед эмиссией LLVM компилятор лоуэрит AST в линейный трёхадресный
+// код. Каждая инструкция имеет максимум три операнда: dst = a OP b.
+// Управление потоком — через label/goto/branch. Посмотреть IR можно
+// командой:
+//   myc this_file.herta --dump-ir
+//
+// Программа намеренно использует много разных конструкций, чтобы в IR
+// были видны: Move, Bin, Un, Call, MakeArray, MakeStruct, LoadIndex,
+// LoadField, Label/Goto/Branch (через if и while), Return.
+
+module b2_1_ir;
+
+struct Point { x: int32, y: int32 }
+
+fn square(n: int32) int32 {
+    return n * n;
+}
+
+fn main() int32 {
+    // Move + Bin (арифметика)
+    let a: int32 = 2 + 3 * 4;
+    print(a);
+
+    // Call
+    let s: int32 = square(7);
+    assert(s == 49);
+    print(s);
+
+    // MakeArray + LoadIndex
+    let arr: [int32; 3] = [10, 20, 30];
+    print(arr[1]);
+
+    // MakeStruct + LoadField
+    let p: Point = Point { x: 5, y: 12 };
+    print(p.x + p.y);
+
+    // Un + Bin (унарный минус, сравнение)
+    let neg: int32 = -10;
+    let isneg: bool = neg < 0;
+    assert(isneg);
+
+    // Branch (через if): два пути управления.
+    var sign: int32 = 0;
+    if neg < 0 {
+        sign = -1;
+    } else {
+        sign = 1;
+    }
+    print(sign);
+
+    // Цикл while → Label + Branch + Goto.
+    var sum: int32 = 0;
+    var i: int32 = 1;
+    while i <= 10 {
+        sum = sum + i;
+        i = i + 1;
+    }
+    assert(sum == 55);
+    print(sum);
+
+    print("b2.1 ok");
+    return 0;
+}

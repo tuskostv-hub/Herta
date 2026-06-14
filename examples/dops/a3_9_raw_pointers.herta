@@ -1,0 +1,49 @@
+// A.3.9 Обобщённые и сырые указатели.
+// *void и *byte — сырые указатели, свободно приводятся к любому типизированному
+// без явного каста (правило can_implicit_convert для raw-указателей).
+// byte — 1-байтный raw-тип, не арифметический (нельзя складывать или сравнивать <).
+// type-алиасы дают красивые имена для сложных указательных типов.
+
+module a3_9_raw_pointers;
+
+type IntPtr = *int32;
+type RawPtr = *void;
+
+fn main() int32 {
+    // Типизированный указатель.
+    var x: int32 = 12345;
+    let p: IntPtr = &x;
+    assert(*p == 12345);
+
+    // *int32 → *void (сырой) без каста — implicit conversion разрешает.
+    let raw: RawPtr = p;
+    print("raw assigned");
+
+    // Обратно: raw → typed *int32 тоже implicit (раз один из is_raw).
+    let p2: *int32 = raw;
+    assert(*p2 == 12345);
+    print(*p2);
+
+    // *byte — второй raw-тип.
+    let raw_b: *byte = p;
+    let p3: *int32 = raw_b;
+    assert(*p3 == 12345);
+
+    // null — это *void, неявно приводится к любому *T.
+    let pn: *int32 = null;
+    let pn2: *byte = null;
+    let pn3: *void = null;
+    print("null pointers declared");
+
+    // Цепочка raw → typed → raw — все через implicit conversion.
+    var root: int32 = 777;
+    let typed: *int32 = &root;
+    let r1: *void = typed;
+    let r2: *byte = r1;
+    let back: *int32 = r2;
+    assert(*back == 777);
+    print(*back);
+
+    print("a3.9 ok");
+    return 0;
+}

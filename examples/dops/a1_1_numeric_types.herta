@@ -1,0 +1,52 @@
+// A.1.1 Числовые типы различных размеров.
+// Знаковые int8..int64, беззнаковые uint8..uint64, вещественные float32/64.
+// Проверяем граничные значения и корректность операций на каждой ширине.
+
+module a1_1_numeric_types;
+
+fn main() int32 {
+    // Знаковые
+    let i8_min:  int8  = -128;
+    let i8_max:  int8  = 127;
+    let i16_max: int16 = 32767;
+    let i32_max: int32 = 2147483647;
+    let i64_max: int64 = 9223372036854775807;
+
+    print(i8_min);
+    print(i8_max);
+    print(i16_max);
+    print(i32_max);
+    print(i64_max);
+
+    // Беззнаковые
+    let u8_max:  uint8  = 255;
+    let u16_max: uint16 = 65535;
+    let u32_max: uint32 = 4294967295;
+    // u64 максимум не помещается в парсер (он работает через int64), берём предел int64.
+    let u64_big: uint64 = 9223372036854775807;
+
+    print(u8_max);
+    print(u16_max);
+    print(u32_max);
+    print(u64_big);
+
+    // Вещественные
+    let f32_val: float32 = 3.14;
+    let f64_val: float64 = 2.718281828459045;
+    print(f32_val);
+    print(f64_val);
+
+    // Арифметика разной ширины
+    let a: int16 = 100;
+    let b: int16 = 200;
+    let sum: int16 = a + b;
+    assert(sum == 300);
+
+    let u: uint8 = 200;
+    let v: uint8 = 50;
+    let usum: uint8 = u + v;
+    assert(usum == 250);
+
+    print("a1.1 ok");
+    return 0;
+}

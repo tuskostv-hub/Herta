@@ -1,0 +1,62 @@
+// A.2.12 Методы структур и видимость членов.
+// impl-блок добавляет к типу instance- и static-методы.
+// `self` как первый параметр делает метод instance-методом, без него — static.
+// pub разрешает использовать метод из других модулей.
+
+module a2_12_methods;
+
+struct Rect {
+    w: int32,
+    h: int32,
+}
+
+impl Rect {
+    // Static-метод: конструктор. Зовётся как Rect.make(...).
+    pub fn make(w: int32, h: int32) Rect {
+        return Rect { w: w, h: h };
+    }
+
+    // Static-метод без pub — приватный, виден только внутри методов этого типа.
+    fn zero() Rect {
+        return Rect { w: 0, h: 0 };
+    }
+
+    // Instance-метод. Зовётся как r.area().
+    pub fn area(self: Rect) int32 {
+        return self.w * self.h;
+    }
+
+    pub fn perimeter(self: Rect) int32 {
+        return 2 * (self.w + self.h);
+    }
+
+    // Метод, который зовёт другой метод (через self) и приватный конструктор.
+    pub fn describe(self: Rect) int32 {
+        print("rect:");
+        print(self.w);
+        print(self.h);
+        print("area:");
+        print(self.area());
+        print("perimeter:");
+        print(self.perimeter());
+        let z: Rect = Rect.zero();   // приватный — но мы внутри impl
+        print("zero area:");
+        print(z.area());
+        return 0;
+    }
+}
+
+fn main() int32 {
+    let r: Rect = Rect.make(4, 5);
+    assert(r.area() == 20);
+    assert(r.perimeter() == 18);
+
+    r.describe();
+
+    // Несколько разных инстансов
+    let square: Rect = Rect.make(3, 3);
+    assert(square.area() == 9);
+
+    print("a2.12 ok");
+    return 0;
+}

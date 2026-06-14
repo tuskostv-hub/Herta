@@ -1,0 +1,32 @@
+// База: представление inf/NaN (IEEE 754) и конверсии между строками
+// и числовыми типами.
+
+module inf_nan_conv;
+
+fn main() int32 {
+    // Бесконечности и NaN
+    let pos_inf: float64 = inf();
+    let neg_inf: float64 = 0.0 - inf();
+    let not_a_num: float64 = nan();
+
+    print(pos_inf);             // inf
+    print(neg_inf);             // -inf
+    print(not_a_num);           // nan
+    print(not_a_num == not_a_num);  // NaN != NaN по стандарту → false
+    print(pos_inf > 1.0e100);   // true: inf больше любого конечного
+
+    // Число → строка
+    print(int_to_string(42));
+    print(int_to_string(0 - 1000));
+    print(float_to_string(3.14));
+    print(float_to_string(pos_inf));
+
+    // Строка → число; на неуспехе возвращается 0 / 0.0
+    print(parse_int("123"));
+    print(parse_int("-7"));
+    print(parse_int("abc"));         // 0
+    print(parse_float("2.71828"));
+    print(parse_float("not a num")); // 0
+
+    return 0;
+}

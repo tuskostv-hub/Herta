@@ -1,0 +1,33 @@
+// Библиотечный модуль с явным разделением public/private.
+
+module Lib;
+
+// Публичные функции.
+pub fn add(a: int32, b: int32) int32 {
+    return a + b;
+}
+
+pub fn double(x: int32) int32 {
+    return secret_helper(x);  // внутри модуля приватное доступно.
+}
+
+// Приватная функция: для внешнего мира `Lib.secret_helper` запрещён.
+fn secret_helper(x: int32) int32 {
+    return x * 2;
+}
+
+// Структура и методы как обычный полный пакет (без cross-module).
+pub struct Counter { value: int32 }
+
+impl Counter {
+    pub fn tick(self: Counter) int32 {
+        return self.value + 1;
+    }
+    // Приватный метод. Из вне Lib не позвать.
+    fn helper(self: Counter) int32 {
+        return self.value * 2;
+    }
+}
+
+// Приватный тип.
+struct Hidden { tag: int32 }

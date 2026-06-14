@@ -450,6 +450,17 @@ SemanticAnalyzer::SemanticAnalyzer(const ast::Program& prog,
     add_fn("exit",  {Type(Primitive::I32)},    Type(Primitive::Void));
     add_fn("panic", {Type(Primitive::String)}, Type(Primitive::Void));
     add_fn("len",   {Type(Primitive::String)}, Type(Primitive::I32));
+    add_fn("sleep_ms", {Type(Primitive::I64)}, Type(Primitive::Void));
+
+    // Конверсии число ↔ строка. parse_* возвращает 0 / 0.0 на неуспех.
+    add_fn("int_to_string",   {Type(Primitive::I64)},    Type(Primitive::String));
+    add_fn("float_to_string", {Type(Primitive::F64)},    Type(Primitive::String));
+    add_fn("parse_int",       {Type(Primitive::String)}, Type(Primitive::I64));
+    add_fn("parse_float",     {Type(Primitive::String)}, Type(Primitive::F64));
+
+    // Float-константы: бесконечность и NaN (по спеке IEEE 754).
+    add_fn("inf", {}, Type(Primitive::F64));
+    add_fn("nan", {}, Type(Primitive::F64));
 }
 
 void SemanticAnalyzer::error(SourceLocation loc, std::string msg) {

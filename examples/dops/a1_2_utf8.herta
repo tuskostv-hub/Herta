@@ -1,0 +1,57 @@
+// A.1.2 UTF-8 в строках и символах.
+// Char-литералы декодируются из 1-4 байт UTF-8 в codepoint (uint32).
+// Строки хранятся как UTF-8 байты; len() возвращает длину в байтах.
+
+module a1_2_utf8;
+
+fn main() int32 {
+    // ASCII-символы
+    let a: char = 'a';
+    let z: char = 'z';
+    print(a);
+    print(z);
+
+    // 2-байтные UTF-8: русские буквы
+    let yo: char = 'ё';
+    let zh: char = 'ж';
+    print(yo);
+    print(zh);
+
+    // 3-байтные UTF-8: японские каны
+    let hi: char = 'ひ';
+    print(hi);
+
+    // 4-байтные UTF-8: emoji
+    let star: char = '🌟';
+    print(star);
+
+    // Получение числового codepoint
+    let code_a: int32 = int32(a);
+    let code_yo: int32 = int32(yo);
+    assert(code_a == 97);
+    assert(code_yo == 1105);
+    print(code_a);
+    print(code_yo);
+
+    // Строка с UTF-8 байтами
+    let greeting: string = "Привет, мир!";
+    print(greeting);
+    // len в байтах: 12 русских букв × 2 + запятая + пробел + "мир" 3×2 + "!"
+    // = "Привет" 12 + ", " 2 + "мир" 6 + "!" 1 = 21
+    let n: int32 = len(greeting);
+    print(n);
+    assert(n == 21);
+
+    // Конкатенация UTF-8
+    let hello: string = "こんにちは";
+    let world: string = "世界";
+    let phrase: string = hello + " " + world;
+    print(phrase);
+
+    // Сравнение UTF-8
+    assert("ё" == "ё");
+    assert("а" != "б");
+
+    print("a1.2 ok");
+    return 0;
+}

@@ -1,0 +1,54 @@
+// A.1.7 Автоматический вывод типов.
+// Через := тип переменной определяется по инициализатору.
+// Поддерживаются примитивы, массивы, структуры, указатели.
+
+module a1_7_type_inference;
+
+struct Point { x: int32, y: int32 }
+
+fn main() int32 {
+    // Целое выводится как int32
+    var n := 42;
+    n = n + 1;
+    print(n);
+    assert(n == 43);
+
+    // Вещественное → float64
+    let pi := 3.14;
+    print(pi);
+
+    // bool
+    let flag := true;
+    assert(flag);
+
+    // string
+    let greet := "hello";
+    print(greet);
+
+    // char
+    let letter := 'Z';
+    print(letter);
+
+    // Массив
+    var arr := [10, 20, 30];
+    print(arr[0]);
+    print(arr[1]);
+    print(arr[2]);
+    arr[0] = 100;
+    assert(arr[0] == 100);
+
+    // Структура
+    let p := Point { x: 5, y: 7 };
+    print(p.x);
+    print(p.y);
+    assert(p.x + p.y == 12);
+
+    // Указатель — тип выводится из &
+    var v: int32 = 99;
+    let ptr := &v;
+    print(*ptr);
+    assert(*ptr == 99);
+
+    print("a1.7 ok");
+    return 0;
+}
