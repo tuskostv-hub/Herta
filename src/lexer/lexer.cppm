@@ -305,7 +305,6 @@ void Lexer::skip_whitespace_and_comments() {
             advance();
         } else if (c == '/' && peek(1) == '/') {
             // Однострочный комментарий: пропускаем всё до перевода строки
-            // (сам перевод строки оставляем, он отработает на следующем шаге)
             while (!at_end() && peek() != '\n') advance();
         } else {
             break;
@@ -352,13 +351,13 @@ Token Lexer::scan_number(herta::common::SourceLocation start,
     // Десятичная целая часть
     while (!at_end() && is_digit(peek())) advance();
 
-    // Float? По грамматике нужно digit "." digit { digit } [ exponent ].
+    // Float По грамматике нужно digit "." digit { digit } [ exponent ].
     // То есть "1." без цифры после точки даёт два токена: IntLiteral "1" и Dot.
     if (peek() == '.' && is_digit(peek(1))) {
         advance();  // '.'
         while (!at_end() && is_digit(peek())) advance();
 
-        // Необязательная экспонента: (e|E) [+|-] цифры
+        // экспонента: (e|E) [+|-] цифры
         if (peek() == 'e' || peek() == 'E') {
             auto exp_loc = current_loc();
             advance();  // 'e' / 'E'
