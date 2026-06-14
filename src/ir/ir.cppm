@@ -507,11 +507,12 @@ void Lowerer::lower_stmt(const ast::Stmt& s) {
 
 void Lowerer::lower_var_decl(const ast::VarDeclStmt& v) {
     auto rhs = lower_expr(*v.init);
-    // Если справа NullC, а в объявлении указан конкретный pointer-тип,
-    // вставляем Cast, чтобы IR-тип переменной совпал с декларированным.
-    // Иначе бэкенд увидит p как *void и упадёт при разыменовании.
-    if (rhs.kind == OperandKind::NullC && v.type
-        && dynamic_cast<const ast::PointerType*>(v.type.get())) {
+    // Если в объявлении указан конкретный тип, вставляем Cast в этот тип.
+    // Без этого бэкенд выводит тип переменной из rhs (IntC → int64), и
+    // var x: int8 = 100; даст alloca i64 вместо i8 — нарушая wraparound
+    // по разрядности из types.md §6.4. Cast также покрывает случай
+    // var p: *T = null; (без него *p в бэкенде был бы *void).
+    if (v.type) {
         auto cast_temp = fresh_temp();
         Instr c; c.kind = InstrKind::Cast; c.dst = cast_temp; c.has_dst = true;
         c.a = rhs; c.type_name = ast_type_to_str(*v.type); c.loc = v.loc;

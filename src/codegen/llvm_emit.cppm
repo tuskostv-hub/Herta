@@ -900,6 +900,11 @@ void Emitter::emit_instr(FnState& st, const ir::Instr& ins) {
         case IK::StorePtr: {
             auto [p, pty] = eval_operand(st, ins.a);
             auto [v, vty] = eval_operand(st, ins.value_to_store);
+            // Тип записи определяется pointee, иначе IntC литерал (int64)
+            // переедет 8 байт в i32-слот и затрёт соседнюю стэк-память.
+            auto pt = parse_type(pty);
+            auto dst_ty = pt.kind == TypeInfo::Kind::Pointer ? pt.elem_or_name : vty;
+            auto vw = widen(st, v, vty, dst_ty);
             // null-check.
             auto null_cmp = fresh_ssa(st);
             st.body += std::format("  {} = icmp eq ptr {}, null\n", null_cmp, p);
@@ -910,7 +915,7 @@ void Emitter::emit_instr(FnState& st, const ir::Instr& ins) {
             st.body += std::format("  call void @herta_rt_null_deref(i64 {})\n", ins.loc.line);
             st.body += "  unreachable\n";
             st.body += std::format("{}:\n", ok);
-            st.body += std::format("  store {} {}, ptr {}\n", llvm_type(vty), v, p);
+            st.body += std::format("  store {} {}, ptr {}\n", llvm_type(dst_ty), vw, p);
             return;
         }
     }

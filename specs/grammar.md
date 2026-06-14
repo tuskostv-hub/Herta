@@ -349,7 +349,8 @@ assign_stmt    = lvalue "=" expr ";" ;
 
 lvalue         = identifier
                | lvalue "[" expr "]"
-               | lvalue "." identifier ;
+               | lvalue "." identifier
+               | "*" expr ;        (* запись через указатель: *p = v *)
 ```
 
 Пример: `x = x + 1;`
@@ -445,8 +446,12 @@ rel_expr       = add_expr { ( "<" | ">" | "<=" | ">=" ) add_expr } ;
 add_expr       = mul_expr { ( "+" | "-" ) mul_expr } ;
 mul_expr       = unary    { ( "*" | "/" | "%" ) unary } ;
 
-unary          = ( "!" | "-" ) unary
+unary          = ( "!" | "-" | "&" | "*" ) unary
                | postfix ;
+
+(*  & — взятие адреса (rvalue), даёт *T для операнда типа T.
+    * — разыменование указателя; в позиции lvalue допустимо как цель
+    присваивания (*p = v). См. semantics.md §15 «Указатели». *)
 
 postfix        = primary { postfix_op } ;
 postfix_op     = "[" expr "]"
@@ -463,6 +468,7 @@ primary        = int_literal
                | float_literal
                | bool_literal
                | string_literal
+               | "null"               (* нулевой указатель — совместим с любым *T *)
                | array_literal
                | struct_literal
                | identifier
@@ -491,16 +497,21 @@ add(1, 2)           // вызов функции
 ```
 type_expr      = base_type
                | array_type
+               | pointer_type
                | identifier ;     -- пользовательский тип (struct / alias)
 
 base_type      = "int8"  | "int16"  | "int32"  | "int64"
                | "uint8" | "uint16" | "uint32" | "uint64"
                | "float32" | "float64"
                | "bool"
+               | "char"
                | "string"
+               | "byte"           -- неарифметический сырой 1-байтный тип
                | "void" ;
 
 array_type     = "[" type_expr ";" int_literal "]" ;
+
+pointer_type   = "*" type_expr ;   (* *T — указатель; допустимо *void для raw *)
 ```
 
 Примеры типов:
