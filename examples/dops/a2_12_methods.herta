@@ -1,13 +1,31 @@
 // A.2.12 Методы структур и видимость членов.
 // impl-блок добавляет к типу instance- и static-методы.
 // `self` как первый параметр делает метод instance-методом, без него — static.
-// pub разрешает использовать метод из других модулей.
+// Метод без pub приватен: доступен только из методов своего типа.
+// Поле с префиксом priv тоже приватно: читать/писать его и конструировать
+// литерал с ним можно только в методах типа.
+// Ошибочные случаи — в соседней папке a2_12_visibility/.
 
 module a2_12_methods;
 
 struct Rect {
     w: int32,
     h: int32,
+}
+
+// Тип со скрытым полем: снаружи конструируется только через фабрику.
+struct Account {
+    owner: string,
+    priv balance: int32,
+}
+
+impl Account {
+    pub fn open(owner: string, initial: int32) Account {
+        return Account { owner: owner, balance: initial };
+    }
+    pub fn balance_of(self: Account) int32 {
+        return self.balance;   // priv-поле доступно методу своего типа
+    }
 }
 
 impl Rect {
@@ -56,6 +74,11 @@ fn main() int32 {
     // Несколько разных инстансов
     let square: Rect = Rect.make(3, 3);
     assert(square.area() == 9);
+
+    // priv-поле: снаружи типа доступ только через pub-методы.
+    let acc: Account = Account.open("herta", 100);
+    print(acc.owner);              // публичное поле — можно
+    assert(acc.balance_of() == 100);
 
     print("a2.12 ok");
     return 0;

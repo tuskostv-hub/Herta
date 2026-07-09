@@ -22,8 +22,7 @@ fn main() int32 {
     let u8_max:  uint8  = 255;
     let u16_max: uint16 = 65535;
     let u32_max: uint32 = 4294967295;
-    // u64 максимум не помещается в парсер (он работает через int64), берём предел int64.
-    let u64_big: uint64 = 9223372036854775807;
+    let u64_big: uint64 = 18446744073709551615;   // полный максимум uint64
 
     print(u8_max);
     print(u16_max);
@@ -46,6 +45,17 @@ fn main() int32 {
     let v: uint8 = 50;
     let usum: uint8 = u + v;
     assert(usum == 250);
+
+    // Суффиксы литералов задают тип без аннотации переменной.
+    var s8 := 100i8;        // int8
+    s8 = s8 + 100i8;        // 200 не помещается → wraparound: -56
+    print(s8);
+    let su := 42u16;        // uint16
+    assert(su == 42u16);
+    let sf := 2.5f32;       // float32
+    print(sf);
+    let big := 5000000000;  // без суффикса не помещается в int32 → int64
+    print(big);
 
     print("a1.1 ok");
     return 0;

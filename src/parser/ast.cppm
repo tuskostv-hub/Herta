@@ -73,9 +73,10 @@ export struct TypeExpr {
     virtual void dump(std::ostream& os, int level) const = 0;
 };
 
-// Простое имя типа: int32, Point, Meters и т.п.
+// Простое имя типа: int32, Point, Meters — либо квалифицированное имя
+// из другого модуля / пространства имён: Math.Vec2, M.NS.T (части через точку).
 export struct NamedType : TypeExpr {
-    std::string name;
+    std::string name;  // возможно с точками: "Math.Vec2"
 
     void dump(std::ostream& os, int level) const override {
         indent(os, level);
@@ -129,21 +130,34 @@ export struct Expr {
 };
 
 export struct IntLit : Expr {
+    // value хранит битовый паттерн: для литералов больше int64::max
+    // (возможных только у uint64) ставится флаг u64_only.
     std::int64_t value = 0;
-    std::string lexeme;  // как было написано в исходнике (для диагностики)
+    bool u64_only = false;   // значение помещается только в uint64
+    std::string suffix;      // суффикс типа: "i8".."u64", пусто — нет суффикса
+    std::string lexeme;      // как было написано в исходнике (для диагностики)
 
     void dump(std::ostream& os, int level) const override {
         indent(os, level);
-        os << "IntLit " << value << '\n';
+        if (u64_only) {
+            os << "IntLit " << static_cast<std::uint64_t>(value);
+        } else {
+            os << "IntLit " << value;
+        }
+        if (!suffix.empty()) os << ' ' << suffix;
+        os << '\n';
     }
 };
 
 export struct FloatLit : Expr {
     double value = 0.0;
+    std::string suffix;      // "f32" / "f64", пусто — нет суффикса
 
     void dump(std::ostream& os, int level) const override {
         indent(os, level);
-        os << "FloatLit " << value << '\n';
+        os << "FloatLit " << value;
+        if (!suffix.empty()) os << ' ' << suffix;
+        os << '\n';
     }
 };
 
@@ -232,7 +246,7 @@ export struct StructLitField {
 };
 
 export struct StructLit : Expr {
-    std::string type_name;
+    std::string type_name;  // возможно квалифицированное: "Math.Vec2"
     std::vector<StructLitField> fields;
 
     void dump(std::ostream& os, int level) const override {
@@ -458,7 +472,7 @@ export struct Param {
 export struct FnDecl : Decl {
     std::string name;
     std::vector<Param> params;
-    std::unique_ptr<TypeExpr> return_type;
+    std::unique_ptr<TypeExpr> return_type;  // nullptr — тип выводится по return
     std::unique_ptr<BlockStmt> body;
 
     void dump(std::ostream& os, int level) const override {
@@ -471,8 +485,9 @@ export struct FnDecl : Decl {
                 p.type->dump(os, level + 3);
             }
         }
-        indent(os, level + 1); os << "return:\n";
-        return_type->dump(os, level + 2);
+        indent(os, level + 1);
+        os << (return_type ? "return:" : "return: (inferred)") << '\n';
+        if (return_type) return_type->dump(os, level + 2);
         if (body) body->dump(os, level + 1);
     }
 };
@@ -480,6 +495,7 @@ export struct FnDecl : Decl {
 export struct StructField {
     std::string name;
     std::unique_ptr<TypeExpr> type;
+    bool is_priv = false;  // priv-поле доступно только методам своего типа
     SourceLocation loc;
 };
 
@@ -491,7 +507,8 @@ export struct StructDecl : Decl {
         indent(os, level);
         os << (is_pub ? "pub " : "") << "Struct '" << name << "'\n";
         for (const auto& f : fields) {
-            indent(os, level + 1); os << "field '" << f.name << "'\n";
+            indent(os, level + 1);
+            os << (f.is_priv ? "priv field '" : "field '") << f.name << "'\n";
             f.type->dump(os, level + 2);
         }
     }

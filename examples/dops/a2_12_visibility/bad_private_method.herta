@@ -1,0 +1,19 @@
+// Демонстрация ошибки: метод без pub приватен и не может быть вызван
+// вне методов своего типа.
+//
+// Ожидаемая ошибка при компиляции:
+//   error: method 'C.secret' is private (accessible only from methods of 'C')
+
+module bad_private_method;
+
+struct C { v: int32, }
+
+impl C {
+    pub fn make() C { return C { v: 1 }; }
+    fn secret(self: C) int32 { return self.v; }
+}
+
+fn main() int32 {
+    let c: C = C.make();
+    return c.secret();   // ОШИБКА: приватный метод
+}

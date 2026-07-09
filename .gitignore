@@ -36,3 +36,11 @@ compile_commands.json
 /v1_features
 /Math
 /MathLib
+/inf_nan_conv
+/a1_*
+/a2_*
+/a3_*
+/b1_*
+/b2_*
+/b3_*
+*.ll

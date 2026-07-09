@@ -66,7 +66,7 @@ int main() {
     {
         write_file(tmp.path / "Lib.herta", R"(
             module Lib;
-            fn priv() int32 { return 1; }
+            fn hidden() int32 { return 1; }
             pub fn pub_fn() int32 { return 2; }
         )");
         write_file(tmp.path / "main_pub_ok.herta", R"(
@@ -78,7 +78,7 @@ int main() {
         write_file(tmp.path / "main_priv.herta", R"(
             module main_priv;
             import Lib;
-            fn main() int32 { return Lib.priv(); }
+            fn main() int32 { return Lib.hidden(); }
         )");
         err(tmp.path / "main_priv.herta", "private fn not accessible");
     }
@@ -92,20 +92,49 @@ int main() {
                     return Point { x: x, y: y };
                 }
                 pub fn sum(self: Point) int32 { return self.x + self.y; }
+                fn secret(self: Point) int32 { return 0; }
+            }
+            pub namespace Util {
+                pub fn neg(x: int32) int32 { return -x; }
+                fn inner() int32 { return 0; }
             }
         )");
+        // Квалифицированный тип Geom.Point, статический и инстанс-методы
+        // импортированного типа, struct-литерал Geom.Point { ... }.
         write_file(tmp.path / "main_geom.herta", R"(
             module main_geom;
             import Geom;
             fn main() int32 {
                 let p: Geom.Point = Geom.Point.make(3, 4);
-                return p.sum();
+                let q: Geom.Point = Geom.Point { x: 1, y: 2 };
+                return p.sum() + q.sum();
             }
         )");
-        // Здесь синтаксис `Geom.Point` как тип не поддерживается парсером
-        // (тип-выражение — только NamedType с одним идентификатором).
-        // Поэтому ожидаем ошибку — это known limitation, документирую в plan.
-        err(tmp.path / "main_geom.herta", "qualified type name not supported");
+        ok(tmp.path / "main_geom.herta", "qualified type + cross-module methods");
+        // Кросс-модульный вызов функции в pub namespace.
+        write_file(tmp.path / "main_geons.herta", R"(
+            module main_geons;
+            import Geom;
+            fn main() int32 { return Geom.Util.neg(5) + 5; }
+        )");
+        ok(tmp.path / "main_geons.herta", "cross-module namespace fn");
+        // Не-pub член namespace извне модуля недоступен.
+        write_file(tmp.path / "main_geons_bad.herta", R"(
+            module main_geons_bad;
+            import Geom;
+            fn main() int32 { return Geom.Util.inner(); }
+        )");
+        err(tmp.path / "main_geons_bad.herta", "non-pub namespace member blocked");
+        // Приватный метод импортированного типа недоступен.
+        write_file(tmp.path / "main_geopriv.herta", R"(
+            module main_geopriv;
+            import Geom;
+            fn main() int32 {
+                let p: Geom.Point = Geom.Point.make(3, 4);
+                return p.secret();
+            }
+        )");
+        err(tmp.path / "main_geopriv.herta", "private method blocked cross-module");
     }
 
     {

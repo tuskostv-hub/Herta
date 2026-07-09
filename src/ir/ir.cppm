@@ -344,6 +344,8 @@ public:
           expr_types_(sema_arg.expression_types()),
           methods_(sema_arg.methods()),
           imports_(sema_arg.imports()),
+          fn_return_types_(sema_arg.fn_return_types()),
+          type_expr_types_(sema_arg.type_expr_types()),
           module_scope_(sema_arg.module_scope()) {}
 
     Module lower();
@@ -361,6 +363,10 @@ private:
     void lower_stmt(const ast::Stmt& s);
     void lower_var_decl(const ast::VarDeclStmt& v);
     void lower_assign(const ast::AssignStmt& a);
+    // Запись rhs в произвольный lvalue. Для вложенных цепочек
+    // (a.b.c, m.xs[i].f) применяет схему read-modify-write-back.
+    void store_into(const ast::Expr& target, Operand rhs,
+                    herta::common::SourceLocation loc);
     void lower_return(const ast::ReturnStmt& r);
     void lower_if(const ast::IfStmt& s);
     void lower_while(const ast::WhileStmt& s);
@@ -397,8 +403,19 @@ private:
     [[maybe_unused]] const sema::SemanticAnalyzer& sema_;
     const std::unordered_map<const ast::Expr*, sema::Type>& expr_types_;
     const std::unordered_map<sema::StructTy*, std::vector<sema::MethodInfo>>& methods_;
-    const std::unordered_map<std::string, std::shared_ptr<sema::Scope>>& imports_;
+    [[maybe_unused]] const std::unordered_map<std::string, std::shared_ptr<sema::Scope>>& imports_;
+    const std::unordered_map<const ast::FnDecl*, sema::Type>& fn_return_types_;
+    const std::unordered_map<const ast::TypeExpr*, sema::Type>& type_expr_types_;
     std::shared_ptr<sema::Scope> module_scope_;
+
+    // Уникализация имён переменных: IR различает переменные только по имени,
+    // поэтому одноимённые переменные из разных блоков (shadowing) получают
+    // уникальные имена вида "x.1", "x.2". Стек соответствует блокам функции.
+    std::vector<std::unordered_map<std::string, std::string>> var_scopes_;
+    std::unordered_map<std::string, int> var_name_counts_;
+    std::string declare_var(const std::string& name);
+    std::string resolve_var(const std::string& name) const;
+    bool is_local_var(const std::string& name) const;
 
     std::vector<Function> functions_;
     std::vector<StructDef> struct_defs_;
@@ -450,11 +467,42 @@ void Lowerer::lower_decls(
     }
 }
 
+std::string Lowerer::declare_var(const std::string& name) {
+    auto& n = var_name_counts_[name];
+    std::string unique = (n == 0) ? name : name + "." + std::to_string(n);
+    ++n;
+    var_scopes_.back()[name] = unique;
+    return unique;
+}
+
+std::string Lowerer::resolve_var(const std::string& name) const {
+    for (auto it = var_scopes_.rbegin(); it != var_scopes_.rend(); ++it) {
+        auto f = it->find(name);
+        if (f != it->end()) return f->second;
+    }
+    return name;  // параметры и прочие имена вне блоков
+}
+
+bool Lowerer::is_local_var(const std::string& name) const {
+    for (auto it = var_scopes_.rbegin(); it != var_scopes_.rend(); ++it) {
+        if (it->contains(name)) return true;
+    }
+    return false;
+}
+
 void Lowerer::lower_fn(const ast::FnDecl& fn, const std::string& flat_name) {
     Function f;
     f.name = flat_name;
     f.loc = fn.loc;
-    f.return_type = ast_type_to_str(*fn.return_type);
+    // Тип возврата — из side-таблицы семантики: она знает выведенные типы
+    // (fn без аннотации) и канонические формы (алиасы, Module.Type).
+    if (auto it = fn_return_types_.find(&fn); it != fn_return_types_.end()) {
+        f.return_type = it->second.to_string();
+    } else if (fn.return_type) {
+        f.return_type = ast_type_to_str(*fn.return_type);
+    } else {
+        f.return_type = "void";
+    }
     for (const auto& p : fn.params) {
         f.params.push_back(IrParam{p.name, ast_type_to_str(*p.type)});
     }
@@ -462,6 +510,14 @@ void Lowerer::lower_fn(const ast::FnDecl& fn, const std::string& flat_name) {
     current_fn_ = &functions_.back();
     next_temp_ = 0;
     next_label_ = 0;
+    var_scopes_.clear();
+    var_name_counts_.clear();
+    // Базовый scope функции: параметры отображаются сами в себя.
+    var_scopes_.emplace_back();
+    for (const auto& p : fn.params) {
+        var_scopes_.back()[p.name] = p.name;
+        var_name_counts_[p.name] = 1;
+    }
     lower_block(*fn.body);
     current_fn_ = nullptr;
 }
@@ -474,7 +530,9 @@ void Lowerer::lower_impl(const ast::ImplDecl& im) {
 }
 
 void Lowerer::lower_block(const ast::BlockStmt& b) {
+    var_scopes_.emplace_back();
     for (const auto& s : b.stmts) lower_stmt(*s);
+    var_scopes_.pop_back();
 }
 
 void Lowerer::lower_stmt(const ast::Stmt& s) {
@@ -521,7 +579,7 @@ void Lowerer::lower_var_decl(const ast::VarDeclStmt& v) {
     }
     Instr i;
     i.kind = InstrKind::Move;
-    i.dst = Operand::var(v.name);
+    i.dst = Operand::var(declare_var(v.name));
     i.has_dst = true;
     i.a = rhs;
     i.loc = v.loc;
@@ -530,35 +588,62 @@ void Lowerer::lower_var_decl(const ast::VarDeclStmt& v) {
 
 void Lowerer::lower_assign(const ast::AssignStmt& a) {
     auto rhs = lower_expr(*a.value);
-    // Возможные формы target: Ident, Field, Index, Deref — или глубже вложенные.
-    if (auto* id = dynamic_cast<const ast::IdentExpr*>(a.target.get())) {
-        Instr i; i.kind = InstrKind::Move; i.dst = Operand::var(id->name);
-        i.has_dst = true; i.a = rhs; i.loc = a.loc;
+    store_into(*a.target, std::move(rhs), a.loc);
+}
+
+// Запись rhs в lvalue. Для вложенных целей (a.b.c, m.xs[i].f, (*p).x)
+// применяется read-modify-write-back: база копируется во временную,
+// компонент меняется в копии, копия записывается обратно в свою базу —
+// рекурсивно до корневой переменной или разыменования указателя.
+void Lowerer::store_into(const ast::Expr& target, Operand rhs,
+                         herta::common::SourceLocation loc) {
+    if (auto* id = dynamic_cast<const ast::IdentExpr*>(&target)) {
+        Instr i; i.kind = InstrKind::Move;
+        i.dst = Operand::var(resolve_var(id->name));
+        i.has_dst = true; i.a = std::move(rhs); i.loc = loc;
         emit(std::move(i));
         return;
     }
-    if (auto* fe = dynamic_cast<const ast::FieldExpr*>(a.target.get())) {
-        // x.field = rhs работает, если x — Ident; для более сложного — через временную
-        auto base = lower_expr(*fe->base);
-        Instr i; i.kind = InstrKind::StoreField;
-        i.a = base; i.field = fe->field; i.value_to_store = rhs; i.loc = a.loc;
-        emit(std::move(i));
-        return;
-    }
-    if (auto* ix = dynamic_cast<const ast::IndexExpr*>(a.target.get())) {
-        auto base = lower_expr(*ix->base);
-        auto idx = lower_expr(*ix->index);
-        Instr i; i.kind = InstrKind::StoreIndex;
-        i.a = base; i.b = idx; i.value_to_store = rhs; i.loc = a.loc;
-        emit(std::move(i));
-        return;
-    }
-    // Запись через указатель: *p = rhs
-    if (auto* de = dynamic_cast<const ast::DerefExpr*>(a.target.get())) {
+    if (auto* de = dynamic_cast<const ast::DerefExpr*>(&target)) {
         auto p = lower_expr(*de->operand);
         Instr i; i.kind = InstrKind::StorePtr;
-        i.a = p; i.value_to_store = rhs; i.loc = a.loc;
+        i.a = p; i.value_to_store = std::move(rhs); i.loc = loc;
         emit(std::move(i));
+        return;
+    }
+    if (auto* fe = dynamic_cast<const ast::FieldExpr*>(&target)) {
+        if (auto* base_id = dynamic_cast<const ast::IdentExpr*>(fe->base.get())) {
+            // Прямая запись в поле переменной.
+            Instr i; i.kind = InstrKind::StoreField;
+            i.a = Operand::var(resolve_var(base_id->name));
+            i.field = fe->field; i.value_to_store = std::move(rhs); i.loc = loc;
+            emit(std::move(i));
+            return;
+        }
+        // Вложенная база: копия базы → запись поля в копию → write-back.
+        auto base_copy = lower_expr(*fe->base);
+        Instr i; i.kind = InstrKind::StoreField;
+        i.a = base_copy; i.field = fe->field;
+        i.value_to_store = std::move(rhs); i.loc = loc;
+        emit(std::move(i));
+        store_into(*fe->base, base_copy, loc);
+        return;
+    }
+    if (auto* ix = dynamic_cast<const ast::IndexExpr*>(&target)) {
+        auto idx = lower_expr(*ix->index);
+        if (auto* base_id = dynamic_cast<const ast::IdentExpr*>(ix->base.get())) {
+            Instr i; i.kind = InstrKind::StoreIndex;
+            i.a = Operand::var(resolve_var(base_id->name));
+            i.b = idx; i.value_to_store = std::move(rhs); i.loc = loc;
+            emit(std::move(i));
+            return;
+        }
+        auto base_copy = lower_expr(*ix->base);
+        Instr i; i.kind = InstrKind::StoreIndex;
+        i.a = base_copy; i.b = idx;
+        i.value_to_store = std::move(rhs); i.loc = loc;
+        emit(std::move(i));
+        store_into(*ix->base, base_copy, loc);
         return;
     }
     // Сюда не доберёмся — семантика уже проверила, что слева lvalue.
@@ -630,7 +715,8 @@ Operand Lowerer::lower_expr(const ast::Expr& e) {
     if (auto* bl = dynamic_cast<const ast::BoolLit*>(&e))   return Operand::bool_c(bl->value);
     if (auto* sl = dynamic_cast<const ast::StringLit*>(&e)) return Operand::string_c(sl->value);
     if (auto* cl = dynamic_cast<const ast::CharLit*>(&e))   return Operand::char_c(cl->value);
-    if (auto* id = dynamic_cast<const ast::IdentExpr*>(&e)) return Operand::var(id->name);
+    if (auto* id = dynamic_cast<const ast::IdentExpr*>(&e))
+        return Operand::var(resolve_var(id->name));
     if (auto* u = dynamic_cast<const ast::UnaryExpr*>(&e))  return lower_unary(*u);
     if (auto* b = dynamic_cast<const ast::BinaryExpr*>(&e)) return lower_binary(*b);
     if (auto* f = dynamic_cast<const ast::FieldExpr*>(&e))  return lower_field(*f);
@@ -745,7 +831,8 @@ Operand Lowerer::lower_binary(const ast::BinaryExpr& b) {
 
 Operand Lowerer::lower_field(const ast::FieldExpr& f) {
     // Возможен: Module.x | Namespace.x | struct_value.field.
-    if (auto* id = dynamic_cast<const ast::IdentExpr*>(f.base.get())) {
+    if (auto* id = dynamic_cast<const ast::IdentExpr*>(f.base.get());
+        id && !is_local_var(id->name)) {
         auto sym = module_scope_->lookup(id->name);
         if (sym && (sym->kind == sema::Symbol::Kind::Namespace
                  || sym->kind == sema::Symbol::Kind::Module)) {
@@ -835,8 +922,34 @@ Operand Lowerer::lower_call(const ast::CallExpr& c) {
     return result;
 }
 
+namespace {
+// Чистая цепочка идентификаторов a.b.c → части имени; иначе nullopt.
+std::optional<std::vector<std::string>> name_chain_of(const ast::Expr& e) {
+    std::vector<std::string> parts;
+    const ast::Expr* cur = &e;
+    while (auto* fe = dynamic_cast<const ast::FieldExpr*>(cur)) {
+        parts.push_back(fe->field);
+        cur = fe->base.get();
+    }
+    auto* id = dynamic_cast<const ast::IdentExpr*>(cur);
+    if (!id) return std::nullopt;
+    parts.push_back(id->name);
+    std::ranges::reverse(parts);
+    return parts;
+}
+}  // anonymous namespace
+
 Lowerer::CalleeInfo Lowerer::resolve_callee(const ast::Expr& callee) {
     using K = CalleeInfo::Kind;
+    // Плоское имя метода: методы чужих модулей квалифицируются именем модуля
+    // ("Math.Vec2.norm"), чтобы бэкенд нашёл функцию в нужном модуле.
+    auto method_flat = [&](const sema::MethodInfo& m,
+                           const std::string& struct_name) {
+        std::string flat = struct_name + "." + m.name;
+        if (m.module != prog_.module_name) flat = m.module + "." + flat;
+        return flat;
+    };
+
     if (auto* id = dynamic_cast<const ast::IdentExpr*>(&callee)) {
         // Сначала проверяем builtin'ы по имени.
         if (id->name == "print")  return CalleeInfo{K::BuiltinPrint,  "print",  {}, nullptr};
@@ -853,27 +966,43 @@ Lowerer::CalleeInfo Lowerer::resolve_callee(const ast::Expr& callee) {
         return CalleeInfo{K::Function, id->name, {}, nullptr};
     }
     if (auto* fe = dynamic_cast<const ast::FieldExpr*>(&callee)) {
-        if (auto* base_id = dynamic_cast<const ast::IdentExpr*>(fe->base.get())) {
-            auto base_sym = module_scope_->lookup(base_id->name);
-            if (base_sym) {
-                if (base_sym->kind == sema::Symbol::Kind::Namespace
-                 || base_sym->kind == sema::Symbol::Kind::Module) {
-                    return CalleeInfo{K::Function,
-                                      base_id->name + "." + fe->field, {}, nullptr};
+        // Попытка 1: цепочка имён через namespace/модули: NS.f, M.f, M.NS.f,
+        // T.static, M.T.static, а также касты через квалифицированный тип.
+        auto parts = name_chain_of(callee);
+        if (parts && !is_local_var((*parts)[0])) {
+            const sema::Symbol* sym = module_scope_->lookup((*parts)[0]);
+            std::string path = (*parts)[0];
+            for (std::size_t i = 1; sym && i < parts->size(); ++i) {
+                if (sym->kind == sema::Symbol::Kind::Namespace
+                    || sym->kind == sema::Symbol::Kind::Module) {
+                    sym = sym->ns_scope->lookup_local((*parts)[i]);
+                    if (sym) { path += '.'; path += (*parts)[i]; }
+                    continue;
                 }
-                if (base_sym->kind == sema::Symbol::Kind::TypeName
-                 && base_sym->type.is_struct()) {
-                    // static method T.m(...)
-                    auto* st_ptr = base_sym->type.struct_ptr().get();
-                    auto it = methods_.find(st_ptr);
-                    if (it != methods_.end()) {
+                if (sym->kind == sema::Symbol::Kind::TypeName
+                    && sym->type.is_struct() && i + 1 == parts->size()) {
+                    // static method T.m / M.T.m
+                    auto* st_ptr = sym->type.struct_ptr().get();
+                    if (auto it = methods_.find(st_ptr); it != methods_.end()) {
                         for (const auto& m : it->second) {
-                            if (m.name == fe->field && m.is_static) {
+                            if (m.name == (*parts)[i] && m.is_static) {
                                 return CalleeInfo{K::StaticMethod,
-                                                  base_id->name + "." + fe->field, {}, nullptr};
+                                    method_flat(m, sym->type.strukt().name),
+                                    {}, nullptr};
                             }
                         }
                     }
+                }
+                sym = nullptr;
+            }
+            if (sym) {
+                if (sym->kind == sema::Symbol::Kind::Fn) {
+                    return CalleeInfo{K::Function, path, {}, nullptr};
+                }
+                if (sym->kind == sema::Symbol::Kind::TypeName) {
+                    // Каст через квалифицированное имя: тип уже разрешён
+                    // семантикой; каноническое имя даёт to_string().
+                    return CalleeInfo{K::Cast, {}, sym->type.to_string(), nullptr};
                 }
             }
         }
@@ -886,7 +1015,7 @@ Lowerer::CalleeInfo Lowerer::resolve_callee(const ast::Expr& callee) {
                 for (const auto& m : it->second) {
                     if (m.name == fe->field && !m.is_static) {
                         return CalleeInfo{K::InstanceMethod,
-                                          base_ty_it->second.strukt().name + "." + fe->field,
+                                          method_flat(m, base_ty_it->second.strukt().name),
                                           {}, fe->base.get()};
                     }
                 }
@@ -926,7 +1055,11 @@ Operand Lowerer::lower_struct_lit(const ast::StructLit& sl) {
     auto dst = fresh_temp();
     Instr i; i.kind = InstrKind::MakeStruct; i.dst = dst; i.has_dst = true;
     i.args = std::move(args); i.struct_field_names = std::move(names);
-    i.type_name = sl.type_name; i.loc = sl.loc;
+    // Каноническое имя структуры из семантики: "Math.Vec2" и алиасы
+    // сводятся к имени объявления, известному бэкенду.
+    auto ty = type_of(sl);
+    i.type_name = ty.is_struct() ? ty.strukt().name : sl.type_name;
+    i.loc = sl.loc;
     emit(std::move(i));
     return dst;
 }
@@ -944,6 +1077,12 @@ void Lowerer::emit(Instr i) {
 }
 
 std::string Lowerer::ast_type_to_str(const ast::TypeExpr& te) const {
+    // Семантика записала разрешённый тип каждого TypeExpr: берём каноническую
+    // форму оттуда — так квалифицированные имена (Math.Vec2) и алиасы
+    // сводятся к именам, которые знает бэкенд.
+    if (auto it = type_expr_types_.find(&te); it != type_expr_types_.end()) {
+        return it->second.to_string();
+    }
     if (auto* nt = dynamic_cast<const ast::NamedType*>(&te)) return nt->name;
     if (auto* at = dynamic_cast<const ast::ArrayType*>(&te)) {
         return "[" + ast_type_to_str(*at->element) + "; " + std::to_string(at->size) + "]";

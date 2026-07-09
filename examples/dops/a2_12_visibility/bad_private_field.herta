@@ -1,0 +1,23 @@
+// Демонстрация ошибки: priv-поле недоступно вне методов своего типа —
+// ни на чтение, ни в структ-литерале.
+//
+// Ожидаемая ошибка при компиляции:
+//   error: field 'balance' of struct 'Account' is private ...
+
+module bad_private_field;
+
+struct Account {
+    owner: string,
+    priv balance: int32,
+}
+
+impl Account {
+    pub fn open(owner: string, initial: int32) Account {
+        return Account { owner: owner, balance: initial };
+    }
+}
+
+fn main() int32 {
+    let a: Account = Account.open("x", 10);
+    return a.balance;   // ОШИБКА: приватное поле
+}

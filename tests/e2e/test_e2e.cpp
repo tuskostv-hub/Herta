@@ -146,6 +146,95 @@ int main() {
         "  return *p;\n"  // должен упасть с null-deref
         "}\n", 1, "null pointer dereference");
 
+    // Регрессия БАГ-1: shadowing — внутренняя переменная не должна
+    // затирать внешнюю (semantics.md §5).
+    check("shadowing",
+        "module shadowing;\n"
+        "fn main() int32 {\n"
+        "  var x: int32 = 1;\n"
+        "  {\n"
+        "    var x: int32 = 2;\n"
+        "    print(x);\n"
+        "  }\n"
+        "  print(x);\n"
+        "  return 0;\n}\n", 0, "2\n1\n");
+
+    // Регрессия БАГ-1: shadowing с разными типами.
+    check("shadowing_types",
+        "module shadowing_types;\n"
+        "fn main() int32 {\n"
+        "  var x: int32 = 7;\n"
+        "  {\n"
+        "    var x: string = \"s\";\n"
+        "    print(x);\n"
+        "  }\n"
+        "  print(x);\n"
+        "  return 0;\n}\n", 0, "s\n7\n");
+
+    // Регрессия БАГ-2: запись во вложенные lvalue-цепочки.
+    check("nested_lvalue",
+        "module nested_lvalue;\n"
+        "struct P { x: int32, y: int32 }\n"
+        "struct M { ps: [P; 2], n: int32 }\n"
+        "fn main() int32 {\n"
+        "  var m: M = M { ps: [P{x:1,y:1}, P{x:2,y:2}], n: 2 };\n"
+        "  m.ps[1].x = 99;\n"
+        "  assert(m.ps[1].x == 99);\n"
+        "  var o: M = M { ps: [P{x:0,y:0}, P{x:0,y:0}], n: 0 };\n"
+        "  o.n = 5;\n"
+        "  assert(o.n == 5);\n"
+        "  return 0;\n}\n", 0);
+
+    // Регрессия Н-3: сравнение указателей с null.
+    check("pointer_compare",
+        "module pointer_compare;\n"
+        "fn main() int32 {\n"
+        "  var x: int32 = 1;\n"
+        "  var p: *int32 = &x;\n"
+        "  var q: *int32 = null;\n"
+        "  assert(p != null);\n"
+        "  assert(q == null);\n"
+        "  assert(p != q);\n"
+        "  return 0;\n}\n", 0);
+
+    // Регрессия Н-5: отрицательные вещественные литералы в float32.
+    check("neg_float32",
+        "module neg_float32;\n"
+        "fn main() int32 {\n"
+        "  var b: float32 = -1.5;\n"
+        "  print(b);\n"
+        "  return 0;\n}\n", 0, "-1.5\n");
+
+    // A.1.7: вывод типа возврата функции.
+    check("fn_return_inference",
+        "module fn_return_inference;\n"
+        "fn double(x: int32) { return x * 2; }\n"
+        "fn main() int32 { return double(21); }\n", 42);
+
+    // A.1.1: суффиксы литералов; wraparound по разрядности суффикса.
+    check("suffixes",
+        "module suffixes;\n"
+        "fn main() int32 {\n"
+        "  var a: int8 = 100i8;\n"
+        "  a = a + 100i8;\n"  // 200 wraps → -56
+        "  print(a);\n"
+        "  print(3.5f32);\n"
+        "  print(255u8);\n"
+        "  return 0;\n}\n", 0, "-56\n3.5\n255\n");
+
+    // М-1: uint64-литерал во всём диапазоне.
+    check("uint64_max",
+        "module uint64_max;\n"
+        "fn main() int32 {\n"
+        "  let m: uint64 = 18446744073709551615;\n"
+        "  print(m);\n"
+        "  return 0;\n}\n", 0, "18446744073709551615\n");
+
+    // main обязан возвращать ровно int32 (semantics.md §12).
+    check("main_int8_rejected",
+        "module main_int8_rejected;\n"
+        "fn main() int8 { return 0; }\n", 1, "'main' must return 'int32'");
+
     if (failures == 0) {
         std::cout << "all e2e tests passed\n";
         return 0;

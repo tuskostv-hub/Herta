@@ -232,7 +232,7 @@ int main() {
     ok(R"(
         module m;
         struct P { x: int32, }
-        impl P { fn get(self: P) int32 { return self.x; } }
+        impl P { pub fn get(self: P) int32 { return self.x; } }
         fn main() int32 {
             let p: P = P { x: 7 };
             return p.get();
@@ -241,7 +241,7 @@ int main() {
     ok(R"(
         module m;
         struct P { x: int32, }
-        impl P { fn make() P { return P { x: 42 }; } }
+        impl P { pub fn make() P { return P { x: 42 }; } }
         fn main() int32 {
             let p: P = P.make();
             return p.x;
@@ -250,12 +250,65 @@ int main() {
     ok(R"(
         module m;
         struct P { x: int32, }
-        impl P { fn add(self: P, n: int32) int32 { return self.x + n; } }
+        impl P { pub fn add(self: P, n: int32) int32 { return self.x + n; } }
         fn main() int32 {
             let p: P = P { x: 1 };
             return p.add(2);
         }
     )", "instance method with arg");
+    // Видимость методов (A.2.12): без pub метод доступен только из методов
+    // своего типа.
+    err(R"(
+        module m;
+        struct P { x: int32, }
+        impl P { fn secret(self: P) int32 { return self.x; } }
+        fn main() int32 {
+            let p: P = P { x: 1 };
+            return p.secret();
+        }
+    )", "private method outside type");
+    ok(R"(
+        module m;
+        struct P { x: int32, }
+        impl P {
+            fn secret(self: P) int32 { return self.x; }
+            pub fn get(self: P) int32 { return self.secret(); }
+        }
+        fn main() int32 {
+            let p: P = P { x: 7 };
+            return p.get();
+        }
+    )", "private method from own method");
+    // priv-поля (A.2.12): доступ и конструирование только в методах типа.
+    err(R"(
+        module m;
+        struct P { priv x: int32, }
+        impl P { pub fn make() P { return P { x: 1 }; } }
+        fn main() int32 {
+            let p: P = P.make();
+            return p.x;
+        }
+    )", "priv field read outside type");
+    err(R"(
+        module m;
+        struct P { priv x: int32, }
+        fn main() int32 {
+            let p: P = P { x: 1 };
+            return 0;
+        }
+    )", "priv field literal outside type");
+    ok(R"(
+        module m;
+        struct P { priv x: int32, }
+        impl P {
+            pub fn make() P { return P { x: 41 }; }
+            pub fn get(self: P) int32 { return self.x + 1; }
+        }
+        fn main() int32 {
+            let p: P = P.make();
+            return p.get();
+        }
+    )", "priv field inside methods");
     err(R"(
         module m;
         struct P { x: int32, }
@@ -282,8 +335,8 @@ int main() {
     ok(R"(
         module m;
         struct P { x: int32, }
-        impl P { fn a(self: P) int32 { return self.x; } }
-        impl P { fn b(self: P, n: int32) int32 { return self.x + n; } }
+        impl P { pub fn a(self: P) int32 { return self.x; } }
+        impl P { pub fn b(self: P, n: int32) int32 { return self.x + n; } }
         fn main() int32 {
             let p: P = P { x: 7 };
             return p.a() + p.b(3);
@@ -369,6 +422,115 @@ int main() {
             return a[0];
         }
     )", "let array element immutable (chain)");
+
+    // Указатели: == / != включая null (fix Н-3); & только на переменной.
+    ok(R"(
+        module m;
+        fn f() bool {
+            var x: int32 = 1;
+            var p: *int32 = &x;
+            return p == null || p != null;
+        }
+    )", "pointer null compare");
+    err(R"(
+        module m;
+        fn f() bool {
+            var x: int32 = 1;
+            var y: float64 = 1.0;
+            var p: *int32 = &x;
+            var q: *float64 = &y;
+            return p == q;
+        }
+    )", "pointer compare different pointee");
+    err(R"(
+        module m;
+        struct P { x: int32, }
+        fn f() int32 {
+            var p: P = P { x: 1 };
+            let q: *int32 = &p.x;
+            return 0;
+        }
+    )", "& on field rejected");
+    err(R"(
+        module m;
+        fn f() int32 {
+            var a: [int32; 2] = [1, 2];
+            let q: *int32 = &a[0];
+            return 0;
+        }
+    )", "& on index rejected");
+    // print не принимает указатели и byte (fix БАГ-4).
+    err(R"(
+        module m;
+        fn f() void {
+            var x: int32 = 1;
+            var p: *int32 = &x;
+            print(p);
+        }
+    )", "print pointer rejected");
+    // Отрицательные вещественные литералы адаптируются к float32 (fix Н-5).
+    ok("module m; fn f() float32 { return -1.5; }", "neg float lit to float32");
+    err("module m; fn f() float32 { return 3.4e50; }", "float lit too big for float32");
+    ok("module m; fn f() float64 { var x: float32 = -2.5; return x; }",
+       "neg float lit var decl");
+    // Суффиксы литералов (A.1.1).
+    ok("module m; fn f() int8 { return 42i8; }", "suffix i8");
+    ok("module m; fn f() uint64 { return 7u64; }", "suffix u64");
+    ok("module m; fn f() float32 { return 2.5f32; }", "suffix f32");
+    ok("module m; fn f() int64 { return 42i16; }", "suffixed literal widens");
+    err("module m; fn f() int8 { return 300i8; }", "suffix value does not fit");
+    err("module m; fn f() int8 { return 42i16; }", "suffixed literal does not narrow");
+    // Литералы без суффикса: int32, при переполнении — int64; uint64-макс
+    // достижим (М-1).
+    ok("module m; fn f() int64 { var x := 5000000000; return x; }",
+       "big literal defaults to int64");
+    ok("module m; fn f() uint64 { return 18446744073709551615; }",
+       "uint64 max literal");
+    err("module m; fn f() int64 { return 18446744073709551615; }",
+        "uint64-range literal not int64");
+    // byte: значение создаётся только явным cast'ом, сравнимо на == / !=.
+    ok(R"(
+        module m;
+        fn f() bool {
+            var b: byte = byte(7);
+            let c: byte = byte(7);
+            return b == c;
+        }
+    )", "byte cast + eq");
+    err("module m; fn f() void { var b: byte = 0; }", "byte needs explicit cast");
+    err(R"(
+        module m;
+        fn f() byte {
+            var a: byte = byte(1);
+            var b: byte = byte(2);
+            return a + b;
+        }
+    )", "byte not arithmetic");
+    // Вывод типа возврата функции (A.1.7).
+    ok(R"(
+        module m;
+        fn double(x: int32) { return x * 2; }
+        fn main() int32 { return double(21); }
+    )", "fn return type inference");
+    ok(R"(
+        module m;
+        fn greet() { print("hi"); }
+        fn main() int32 { greet(); return 0; }
+    )", "fn infers void");
+    err(R"(
+        module m;
+        fn bad(c: bool) {
+            if c { return 1; }
+            return "no";
+        }
+    )", "conflicting inferred return types");
+    // Стрелочная форма типа возврата.
+    ok("module m; fn f() -> int32 { return 1; }", "arrow return type");
+    // Зарезервированные имена builtin'ов (fix Н-4).
+    err("module m; fn f() void { var input: int32 = 5; }", "shadow builtin var");
+    err("module m; fn len() int32 { return 0; }", "redeclare builtin fn");
+    err("module m; fn f(print: int32) int32 { return print; }", "builtin as param");
+    // (строгий int32 у main проверяется e2e-тестами: здесь require_main=false)
 
     ok(R"(
         module m;

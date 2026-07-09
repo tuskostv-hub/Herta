@@ -40,7 +40,11 @@ fn main() int32 {
     assert(b == 1);
 
     // null литерал имеет тип *void, но приводится к *int32.
+    // Указатели сравниваются на == / != (в том числе с null).
     let p_null: *int32 = null;
+    assert(p_null == null);
+    assert(px != null);
+    assert(px != p_null);
 
     print(*px);
     print(a);

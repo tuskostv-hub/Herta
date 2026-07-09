@@ -19,13 +19,22 @@ whitespace    = " " | "\t" | "\r" | "\n" ;
 
 ### 2.1 Ключевые слова
 
-Следующие идентификаторы зарезервированы и не могут использоваться как имена:
+Следующие идентификаторы зарезервированы лексером и не могут использоваться как имена:
 
 ```
 fn        let       var       return    if        else
 while     break     continue  struct    type      namespace
-impl      module    import    pub       true      false
-print     input     exit      panic     assert    len
+impl      module    import    pub       priv      true
+false     null
+```
+
+Кроме того, имена встроенных функций зарезервированы **семантикой**: объявить
+переменную, параметр, функцию, тип или пространство имён с таким именем —
+ошибка компиляции (иначе затенение молча ломало бы builtin):
+
+```
+print  input  exit  panic  assert  len  sleep_ms
+int_to_string  float_to_string  parse_int  parse_float  inf  nan
 ```
 
 > `self` **не** является ключевым словом — это обычный идентификатор, используемый по соглашению как имя первого параметра инстанс-метода (см. §3.2.5).
@@ -43,22 +52,34 @@ identifier    = letter { letter | digit } ;
 #### Целые числа
 
 ```
-int_literal   = decimal_lit | hex_lit | bin_lit ;
+int_literal   = ( decimal_lit | hex_lit | bin_lit ) [ int_suffix ] ;
 decimal_lit   = digit { digit } ;
 hex_lit       = "0x" hex_digit { hex_digit } ;
 bin_lit       = "0b" ( "0" | "1" ) { "0" | "1" } ;
+int_suffix    = "i8" | "i16" | "i32" | "i64"
+              | "u8" | "u16" | "u32" | "u64" ;
 ```
 
-Примеры: `0`, `42`, `1000`, `0xFF`, `0b101010`
+Примеры: `0`, `42`, `1000`, `0xFF`, `0b101010`, `42i8`, `255u8`, `0xFFu32`
+
+Суффикс задаёт тип литерала (A.1.1); значение обязано помещаться в него.
+Литерал без суффикса охватывает весь диапазон `uint64`
+(до `18446744073709551615`); правила выбора типа по умолчанию — types.md §6.
+
+> В hex-литералах суффиксы `f32`/`f64` не распознаются: символы `a..f`
+> неотличимы от hex-цифр (`0xFFf32` — это hex-число `0xFFF32`).
 
 #### Вещественные числа
 
 ```
-float_literal = digit { digit } "." digit { digit } [ exponent ] ;
+float_literal = ( digit { digit } "." digit { digit } [ exponent ]
+                | digit { digit } )            (* целая форма — только с суффиксом *)
+                [ float_suffix ] ;
 exponent      = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
+float_suffix  = "f32" | "f64" ;
 ```
 
-Примеры: `3.14`, `2.0`, `1.5e10`
+Примеры: `3.14`, `2.0`, `1.5e10`, `2.5f32`, `42f64`
 
 #### Булевы значения
 
@@ -110,11 +131,13 @@ field_init     = identifier ":" expr ;
 "+"  "-"  "*"  "/"  "%"          -- арифметика
 "=="  "!="  "<"  ">"  "<="  ">=" -- сравнение
 "&&"  "||"  "!"                  -- логика
+"&"                               -- унарное взятие адреса (см. §3.4)
+"*"                               -- также унарное разыменование указателя
 "="                               -- присваивание
 ":="                              -- объявление с выводом типа (доп.)
 ":"  ","  ";"  "."               -- разделители
 "("  ")"  "{"  "}"  "["  "]"    -- скобки
-"->"                              -- возвращаемый тип функции (альтернатива)
+"->"                              -- возвращаемый тип функции (альтернативная форма)
 ```
 
 ### 2.5 Комментарии
@@ -188,16 +211,29 @@ fn main() int32 {
 #### Функции
 
 ```
-fn_decl        = "fn" identifier "(" [ param_list ] ")" type_expr block ;
+fn_decl        = "fn" identifier "(" [ param_list ] ")"
+                 [ ret_clause ] block ;
+ret_clause     = type_expr | "->" type_expr ;
 
 param_list     = param { "," param } ;
 param          = identifier ":" type_expr ;
 ```
 
+Тип возврата задаётся сразу после `)`, через стрелку `->`, либо опускается —
+тогда он **выводится** по `return`-инструкциям тела (A.1.7, см. semantics.md §7.8.2).
+
 Пример:
 ```
 fn add(a: int32, b: int32) int32 {
     return a + b;
+}
+
+fn sub(a: int32, b: int32) -> int32 {   // стрелочная форма
+    return a - b;
+}
+
+fn twice(x: int32) {                    // тип возврата выведен: int32
+    return x * 2;
 }
 ```
 
@@ -215,14 +251,23 @@ fn main() int32 {
 struct_decl    = "struct" identifier "{" [ field_list ] "}" ;
 
 field_list     = field_decl { "," field_decl } ;
-field_decl     = identifier ":" type_expr ;
+field_decl     = [ "priv" ] identifier ":" type_expr ;
 ```
+
+Поле с префиксом `priv` приватно: доступ к нему (чтение, запись,
+инициализация в литерале) разрешён только из методов своего типа
+(см. semantics.md §13.6). Поля без `priv` публичны.
 
 Пример:
 ```
 struct Point {
     x: float64,
     y: float64,
+}
+
+struct Account {
+    owner: string,
+    priv balance: int32,   // только для методов Account
 }
 ```
 
@@ -449,7 +494,9 @@ mul_expr       = unary    { ( "*" | "/" | "%" ) unary } ;
 unary          = ( "!" | "-" | "&" | "*" ) unary
                | postfix ;
 
-(*  & — взятие адреса (rvalue), даёт *T для операнда типа T.
+(*  & — взятие адреса, даёт *T для операнда типа T. Семантика допускает &
+    только на целой переменной (&x); &s.f и &a[i] — ошибка компиляции,
+    потому что при value semantics это был бы адрес временной копии.
     * — разыменование указателя; в позиции lvalue допустимо как цель
     присваивания (*p = v). См. semantics.md §15 «Указатели». *)
 
@@ -476,15 +523,21 @@ primary        = int_literal
                | cast_expr
                | "(" expr ")" ;
 
-namespace_access = identifier "." identifier ;
+namespace_access = identifier "." identifier { "." identifier } ;
 
 cast_expr      = type_expr "(" expr ")" ;
 ```
+
+Цепочки имён через точку разрешаются по namespace и модулям:
+`NS.f(...)`, `M.f(...)`, `M.NS.f(...)`, `T.static_method(...)`,
+`M.T.static_method(...)`. Литерал структуры тоже может быть
+квалифицированным: `M.Vec2 { x: 1.0, y: 2.0 }`.
 
 Примеры:
 ```
 float64(x)          // явное приведение типов
 Math.abs(-5)        // доступ к элементу пространства имён
+Lib.Util.neg(5)     // pub-функция в pub-namespace другого модуля
 arr[0]              // индексирование массива
 point.x             // доступ к полю структуры
 add(1, 2)           // вызов функции
@@ -498,7 +551,11 @@ add(1, 2)           // вызов функции
 type_expr      = base_type
                | array_type
                | pointer_type
-               | identifier ;     -- пользовательский тип (struct / alias)
+               | named_type ;
+
+named_type     = identifier { "." identifier } ;
+                 -- пользовательский тип (struct / alias), возможно
+                 -- квалифицированный: Math.Vec2, M.NS.T
 
 base_type      = "int8"  | "int16"  | "int32"  | "int64"
                | "uint8" | "uint16" | "uint32" | "uint64"
@@ -525,6 +582,7 @@ void
 [float64; 3]      -- массив из 3 элементов float64
 Point             -- пользовательский тип
 Meters            -- синоним типа
+Math.Vec2         -- pub-тип из импортированного модуля
 ```
 
 ---
@@ -532,13 +590,23 @@ Meters            -- синоним типа
 ## 4. Встроенные функции
 
 Встроенные функции вызываются как обычные, но не требуют объявления.
+Их имена зарезервированы (см. §2.1). Полная семантика — semantics.md §10.
 
-| Имя      | Сигнатура                  | Описание                            |
-|----------|----------------------------|-------------------------------------|
-| `print`  | `fn print(v: T) void`      | Вывод значения в stdout             |
-| `input`  | `fn input() string`        | Чтение строки из stdin              |
-| `exit`   | `fn exit(code: int32) void`| Завершение программы с кодом        |
-| `panic`  | `fn panic(msg: string) void`| Аварийное завершение с сообщением  |
+| Имя               | Сигнатура                          | Описание                              |
+|-------------------|------------------------------------|---------------------------------------|
+| `print`           | `fn print(v: T) void`              | Вывод скаляра/строки в stdout + `\n`   |
+| `input`           | `fn input() string`                | Чтение строки из stdin                 |
+| `exit`            | `fn exit(code: int32) void`        | Завершение программы с кодом           |
+| `panic`           | `fn panic(msg: string) void`       | Аварийное завершение с сообщением      |
+| `assert`          | `fn assert(cond: bool) void`       | Аварийное завершение при ложном cond   |
+| `len`             | `fn len(x: string \| [T; N]) int32`| Длина строки в байтах / размер массива |
+| `sleep_ms`        | `fn sleep_ms(ms: int64) void`      | Пауза в миллисекундах                  |
+| `int_to_string`   | `fn int_to_string(x: int64) string`| Число → строка                         |
+| `float_to_string` | `fn float_to_string(x: float64) string` | Число → строка                    |
+| `parse_int`       | `fn parse_int(s: string) int64`    | Строка → число (0 при неуспехе)        |
+| `parse_float`     | `fn parse_float(s: string) float64`| Строка → число (0.0 при неуспехе)      |
+| `inf`             | `fn inf() float64`                 | +бесконечность IEEE 754                |
+| `nan`             | `fn nan() float64`                 | quiet NaN IEEE 754                     |
 
 ---
 
@@ -555,36 +623,45 @@ Meters            -- синоним типа
 
 ## 6. Полный пример программы
 
+Язык использует value semantics (semantics.md §2): массив-параметр — это
+копия, мутации внутри функции не видны вызывающему. Поэтому сортировка
+принимает массив по значению и **возвращает** отсортированную копию.
+
 ```
 // Пример: сортировка пузырьком
+
+module bubble;
 
 namespace Utils {
     type Index = int32;
 
-    fn swap(arr: [int32; 5], i: Index, j: Index) void {
+    // Массив передаётся по значению: меняем копию и возвращаем её.
+    fn swapped(arr: [int32; 5], i: Index, j: Index) [int32; 5] {
         var tmp: int32 = arr[i];
         arr[i] = arr[j];
         arr[j] = tmp;
+        return arr;
     }
 }
 
-fn bubble_sort(arr: [int32; 5], n: int32) void {
+fn bubble_sort(arr: [int32; 5], n: int32) [int32; 5] {
     var i: int32 = 0;
     while i < n - 1 {
         var j: int32 = 0;
         while j < n - 1 - i {
             if arr[j] > arr[j + 1] {
-                Utils.swap(arr, j, j + 1);
+                arr = Utils.swapped(arr, j, j + 1);
             }
             j = j + 1;
         }
         i = i + 1;
     }
+    return arr;
 }
 
 fn main() int32 {
     var arr: [int32; 5] = [5, 3, 1, 4, 2];
-    bubble_sort(arr, 5);
+    arr = bubble_sort(arr, 5);
 
     var k: int32 = 0;
     while k < 5 {

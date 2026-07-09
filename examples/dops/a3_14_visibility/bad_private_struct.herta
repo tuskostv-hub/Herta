@@ -2,7 +2,7 @@
 // ошибку компиляции.
 //
 // Ожидаемая ошибка при компиляции:
-//   error: 'Hidden' is not exported from module 'Lib'
+//   error: 'Hidden' is not exported from 'Lib'
 
 module bad_private_struct;
 

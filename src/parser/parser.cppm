@@ -72,10 +72,21 @@ private:
     std::unique_ptr<ast::Expr> parse_struct_lit(std::string type_name,
                                                 SourceLocation start);
 
-    std::optional<std::int64_t> parse_int_lexeme(std::string_view lex,
-                                                 SourceLocation loc);
-    std::optional<double> parse_float_lexeme(std::string_view lex,
-                                             SourceLocation loc);
+    // Разобранный целый литерал: битовый паттерн значения, флаг «помещается
+    // только в uint64» и суффикс типа (пустой, если суффикса нет).
+    struct ParsedInt {
+        std::int64_t value = 0;
+        bool u64_only = false;
+        std::string suffix;
+    };
+    std::optional<ParsedInt> parse_int_lexeme(std::string_view lex,
+                                              SourceLocation loc);
+    struct ParsedFloat {
+        double value = 0.0;
+        std::string suffix;
+    };
+    std::optional<ParsedFloat> parse_float_lexeme(std::string_view lex,
+                                                  SourceLocation loc);
     std::optional<std::string> parse_string_lexeme(std::string_view lex,
                                                    SourceLocation loc);
     std::optional<std::uint32_t> parse_char_lexeme(std::string_view lex,
@@ -137,8 +148,40 @@ bool Parser::expect(TokenKind k, std::string_view what) {
 
 // Implementation: литералы
 
-std::optional<std::int64_t> Parser::parse_int_lexeme(std::string_view lex,
-                                                     SourceLocation loc) {
+namespace {
+
+// Отделяет суффикс типа от тела числового литерала. Лексер уже проверил,
+// что суффикс — один из допустимых, здесь только находим его границу.
+std::pair<std::string_view, std::string> split_numeric_suffix(std::string_view lex) {
+    constexpr std::string_view kSuffixes[] = {
+        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64",
+    };
+    bool is_hex = lex.size() >= 2 && lex[0] == '0'
+               && (lex[1] == 'x' || lex[1] == 'X');
+    auto is_body_digit = [&](char c) {
+        if (c >= '0' && c <= '9') return true;
+        if (!is_hex) return false;
+        return (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    };
+    for (auto sfx : kSuffixes) {
+        // В hex-литерале f32/f64 неотличимы от hex-цифр: лексер такие
+        // суффиксы не выделяет, поэтому и здесь их не отщипываем.
+        if (is_hex && sfx[0] == 'f') continue;
+        if (lex.size() > sfx.size() && lex.ends_with(sfx)
+            && is_body_digit(lex[lex.size() - sfx.size() - 1])) {
+            return {lex.substr(0, lex.size() - sfx.size()), std::string(sfx)};
+        }
+    }
+    return {lex, std::string{}};
+}
+
+}  // anonymous namespace
+
+std::optional<Parser::ParsedInt> Parser::parse_int_lexeme(std::string_view lex,
+                                                          SourceLocation loc) {
+    auto full = lex;
+    auto [body, suffix] = split_numeric_suffix(lex);
+    lex = body;
     int base = 10;
     if (lex.size() >= 2 && lex[0] == '0' && (lex[1] == 'x' || lex[1] == 'X')) {
         base = 16;
@@ -147,28 +190,37 @@ std::optional<std::int64_t> Parser::parse_int_lexeme(std::string_view lex,
         base = 2;
         lex.remove_prefix(2);
     }
-    std::int64_t value = 0;
+    // Парсим в uint64, чтобы охватить весь диапазон uint64 (М-1):
+    // значения выше int64::max доступны литералам типа uint64.
+    std::uint64_t value = 0;
     auto [ptr, ec] = std::from_chars(lex.data(), lex.data() + lex.size(),
                                      value, base);
     if (ec != std::errc{} || ptr != lex.data() + lex.size()) {
-        error_at(Token{TokenKind::Invalid, lex, loc},
-                 std::format("invalid integer literal '{}'", lex));
+        error_at(Token{TokenKind::Invalid, full, loc},
+                 std::format("invalid integer literal '{}'", full));
         return std::nullopt;
     }
-    return value;
+    ParsedInt r;
+    r.value = static_cast<std::int64_t>(value);
+    r.u64_only = value > static_cast<std::uint64_t>(
+                             std::numeric_limits<std::int64_t>::max());
+    r.suffix = std::move(suffix);
+    return r;
 }
 
-std::optional<double> Parser::parse_float_lexeme(std::string_view lex,
-                                                 SourceLocation loc) {
+std::optional<Parser::ParsedFloat> Parser::parse_float_lexeme(
+        std::string_view lex, SourceLocation loc) {
+    auto full = lex;
+    auto [body, suffix] = split_numeric_suffix(lex);
     double value = 0.0;
-    auto [ptr, ec] = std::from_chars(lex.data(), lex.data() + lex.size(),
+    auto [ptr, ec] = std::from_chars(body.data(), body.data() + body.size(),
                                      value);
-    if (ec != std::errc{} || ptr != lex.data() + lex.size()) {
-        error_at(Token{TokenKind::Invalid, lex, loc},
-                 std::format("invalid float literal '{}'", lex));
+    if (ec != std::errc{} || ptr != body.data() + body.size()) {
+        error_at(Token{TokenKind::Invalid, full, loc},
+                 std::format("invalid float literal '{}'", full));
         return std::nullopt;
     }
-    return value;
+    return ParsedFloat{value, std::move(suffix)};
 }
 
 // lex приходит целиком, вместе с одинарными кавычками.
@@ -394,8 +446,16 @@ std::unique_ptr<ast::FnDecl> Parser::parse_fn_decl() {
     }
     if (!expect(TokenKind::RParen, "')' after parameter list")) return nullptr;
 
-    auto ret_type = parse_type_expr();
-    if (!ret_type) return nullptr;
+    // Тип возврата: `T { ... }`, `-> T { ... }` либо опущен (A.1.7) —
+    // тогда `{` идёт сразу за `)` и тип выводится по return в теле.
+    std::unique_ptr<ast::TypeExpr> ret_type;
+    if (match(TokenKind::Arrow)) {
+        ret_type = parse_type_expr();
+        if (!ret_type) return nullptr;
+    } else if (!check(TokenKind::LBrace)) {
+        ret_type = parse_type_expr();
+        if (!ret_type) return nullptr;
+    }
 
     auto body = parse_block();
     if (!body) return nullptr;
@@ -425,11 +485,16 @@ std::unique_ptr<ast::StructDecl> Parser::parse_struct_decl() {
     std::vector<ast::StructField> fields;
     if (!check(TokenKind::RBrace)) {
         while (true) {
+            ast::StructField f;
+            // priv-поле доступно только методам своего типа (A.2.12).
+            if (check(TokenKind::KwPriv)) {
+                f.is_priv = true;
+                advance();
+            }
             if (!check(TokenKind::Identifier)) {
                 error("expected field name");
                 return nullptr;
             }
-            ast::StructField f;
             f.loc = current().loc;
             f.name = std::string(current().lexeme);
             advance();
@@ -592,16 +657,16 @@ std::unique_ptr<ast::TypeExpr> Parser::parse_type_expr() {
         advance();
         auto val = parse_int_lexeme(size_lex, size_loc);
         if (!val) return nullptr;
-        if (*val < 0) {
+        if (val->u64_only || val->value < 0) {
             error_at(Token{TokenKind::IntLiteral, size_lex, size_loc},
-                     "array size must be non-negative");
+                     "array size must be a non-negative int64 literal");
             return nullptr;
         }
         if (!expect(TokenKind::RBracket, "']' to close array type")) return nullptr;
         auto a = std::make_unique<ast::ArrayType>();
         a->loc = start;
         a->element = std::move(elem);
-        a->size = *val;
+        a->size = val->value;
         return a;
     }
 
@@ -613,6 +678,13 @@ std::unique_ptr<ast::TypeExpr> Parser::parse_type_expr() {
     n->loc = start;
     n->name = std::string(current().lexeme);
     advance();
+    // Квалифицированное имя типа: Module.Type или Module.Namespace.Type.
+    while (check(TokenKind::Dot) && peek(1).kind == TokenKind::Identifier) {
+        advance();  // '.'
+        n->name += '.';
+        n->name += std::string(current().lexeme);
+        advance();
+    }
     return n;
 }
 
@@ -977,6 +1049,20 @@ std::unique_ptr<ast::Expr> Parser::parse_unary_expr() {
     return parse_postfix_expr();
 }
 
+namespace {
+// Если выражение — чистая цепочка идентификаторов (a / a.b / a.b.c),
+// возвращает её как имя с точками; иначе nullopt.
+std::optional<std::string> dotted_name_of(const ast::Expr& e) {
+    if (auto* id = dynamic_cast<const ast::IdentExpr*>(&e)) return id->name;
+    if (auto* f = dynamic_cast<const ast::FieldExpr*>(&e)) {
+        auto base = dotted_name_of(*f->base);
+        if (!base) return std::nullopt;
+        return *base + "." + f->field;
+    }
+    return std::nullopt;
+}
+}  // anonymous namespace
+
 std::unique_ptr<ast::Expr> Parser::parse_postfix_expr() {
     auto e = parse_primary_expr();
     if (!e) return nullptr;
@@ -990,6 +1076,21 @@ std::unique_ptr<ast::Expr> Parser::parse_postfix_expr() {
             }
             auto name = std::string(current().lexeme);
             advance();
+            // Квалифицированный struct-литерал: Module.Type { ... } —
+            // тот же lookahead, что и для простого Type { ... }.
+            if (allow_struct_lit_ && check(TokenKind::LBrace)) {
+                bool is_struct_lit =
+                    peek(1).kind == TokenKind::RBrace
+                    || (peek(1).kind == TokenKind::Identifier
+                        && peek(2).kind == TokenKind::Colon);
+                if (is_struct_lit) {
+                    if (auto qual = dotted_name_of(*e)) {
+                        e = parse_struct_lit(*qual + "." + name, dot_loc);
+                        if (!e) return nullptr;
+                        continue;
+                    }
+                }
+            }
             auto f = std::make_unique<ast::FieldExpr>();
             f->loc = dot_loc;
             f->base = std::move(e);
@@ -1085,7 +1186,9 @@ std::unique_ptr<ast::Expr> Parser::parse_primary_expr() {
             if (!v) return nullptr;
             auto n = std::make_unique<ast::IntLit>();
             n->loc = loc;
-            n->value = *v;
+            n->value = v->value;
+            n->u64_only = v->u64_only;
+            n->suffix = std::move(v->suffix);
             n->lexeme = std::move(lex);
             return n;
         }
@@ -1096,7 +1199,8 @@ std::unique_ptr<ast::Expr> Parser::parse_primary_expr() {
             if (!v) return nullptr;
             auto n = std::make_unique<ast::FloatLit>();
             n->loc = loc;
-            n->value = *v;
+            n->value = v->value;
+            n->suffix = std::move(v->suffix);
             return n;
         }
         case TokenKind::KwTrue: {

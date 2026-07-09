@@ -66,6 +66,10 @@ bool Driver::compile(const std::filesystem::path& root_file) {
     // Семантика идёт в том же топологическом порядке.
     // Scope каждого готового модуля копится, чтобы зависящие могли им пользоваться.
     std::unordered_map<std::string, std::shared_ptr<herta::semantic::Scope>> exports;
+    // Методы impl-блоков всех обработанных модулей: передаются следующим
+    // анализаторам, чтобы методы импортированных типов были вызываемы.
+    std::unordered_map<herta::semantic::StructTy*,
+                       std::vector<herta::semantic::MethodInfo>> all_methods;
 
     for (std::size_t i = 0; i < modules_.size(); ++i) {
         const auto& mod = *modules_[i];
@@ -90,10 +94,13 @@ bool Driver::compile(const std::filesystem::path& root_file) {
         bool is_root = (i + 1 == modules_.size());
         auto sema = std::make_unique<herta::semantic::SemanticAnalyzer>(
             *mod.program, mod.path.string(), sink_,
-            std::move(imports), /*require_main=*/is_root);
+            std::move(imports), /*require_main=*/is_root,
+            /*imported_methods=*/all_methods);
 
         if (!sema->analyze()) return false;
         exports[mod.name] = sema->module_scope();
+        // Методы этого модуля (вместе с унаследованными) идут дальше по цепочке.
+        all_methods = sema->methods();
         modules_[i]->sema = std::move(sema);
     }
     return true;

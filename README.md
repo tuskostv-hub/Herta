@@ -10,7 +10,7 @@
 - [types.md](specs/types.md) — система типов
 - [codegen.md](specs/codegen.md) — кодогенерация (LLVM IR + clang)
 
-План разработки — [impl_plan.md](impl_plan.md).
+Отчёт о проделанной работе — [report.md](report.md).
 
 ## Требования
 
@@ -45,6 +45,9 @@ cmake --build build
 
 Код завершения исполненной программы — значение, возвращённое из `main`.
 
+`--dump-tokens` и `--dump-ast` работают по одному файлу и не подтягивают
+импорты; остальные режимы проходят полный multi-module pipeline.
+
 ## Тесты
 
 ```bash
@@ -55,9 +58,9 @@ ctest --test-dir build --output-on-failure
 ## Структура репозитория
 
 ```
-inc/herta/   — публичные заголовки фаз компилятора
-src/         — реализация (lexer, parser, semantic, codegen)
+src/         — реализация (common, lexer, parser, semantic, ir, codegen, driver)
 specs/       — спецификация языка
-examples/    — примеры программ
-tests/       — unit-тесты фаз
+examples/    — примеры программ (dops/ — демонстрации допзаданий)
+tests/       — unit-тесты фаз + e2e
+report.md    — отчёт о проделанной работе
 ```

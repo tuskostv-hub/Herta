@@ -124,7 +124,8 @@ std::string llvm_type(std::string_view t) { return llvm_type(parse_type(t)); }
 bool is_signed_int_kind(TypeInfo::Kind k) { return k == TypeInfo::Kind::Int; }
 bool is_int_or_char(const TypeInfo& t) {
     return t.kind == TypeInfo::Kind::Int || t.kind == TypeInfo::Kind::UInt
-        || t.kind == TypeInfo::Kind::Char || t.kind == TypeInfo::Kind::Bool;
+        || t.kind == TypeInfo::Kind::Char || t.kind == TypeInfo::Kind::Bool
+        || t.kind == TypeInfo::Kind::Byte;  // byte ↔ int только через явный cast
 }
 bool is_float(const TypeInfo& t) { return t.kind == TypeInfo::Kind::Float; }
 
@@ -712,10 +713,16 @@ std::string Emitter::widen(FnState& st, const std::string& value,
 
     auto v = fresh_ssa(st);
     if (is_int_or_char(a) && is_int_or_char(b)) {
-        int abits = a.kind == TypeInfo::Kind::Char ? 32 : a.bits ? a.bits : 1;
-        int bbits = b.kind == TypeInfo::Kind::Char ? 32 : b.bits ? b.bits : 1;
-        if (a.kind == TypeInfo::Kind::Bool) abits = 1;
-        if (b.kind == TypeInfo::Kind::Bool) bbits = 1;
+        auto width_of = [](const TypeInfo& t) {
+            switch (t.kind) {
+                case TypeInfo::Kind::Char: return 32;
+                case TypeInfo::Kind::Byte: return 8;
+                case TypeInfo::Kind::Bool: return 1;
+                default: return t.bits ? t.bits : 1;
+            }
+        };
+        int abits = width_of(a);
+        int bbits = width_of(b);
         if (bbits > abits) {
             bool sext = is_signed_int_kind(a.kind);
             st.body += std::format("  {} = {} {} {} to {}\n", v,
@@ -951,8 +958,27 @@ void Emitter::emit_bin(FnState& st, const ir::Instr& ins) {
         store_to(st, ins.dst, r1, "bool");
         return;
     }
-    // Array/Struct == / != — поэлементно через цепочку AND'ов.
+    // Указатели: == и != (включая сравнение с null).
     auto ati = parse_type(at);
+    auto bti = parse_type(bt);
+    if ((ins.bin_op == B::Eq || ins.bin_op == B::NotEq)
+        && (ati.kind == TypeInfo::Kind::Pointer
+         || bti.kind == TypeInfo::Kind::Pointer)) {
+        auto r = fresh_ssa(st);
+        st.body += std::format("  {} = icmp {} ptr {}, {}\n", r,
+                                ins.bin_op == B::Eq ? "eq" : "ne", av, bv);
+        store_to(st, ins.dst, r, "bool");
+        return;
+    }
+    // byte: == и != (тип не арифметический, прочее семантика запретила).
+    if (at == "byte" && bt == "byte") {
+        auto r = fresh_ssa(st);
+        st.body += std::format("  {} = icmp {} i8 {}, {}\n", r,
+                                ins.bin_op == B::Eq ? "eq" : "ne", av, bv);
+        store_to(st, ins.dst, r, "bool");
+        return;
+    }
+    // Array/Struct == / != — поэлементно через цепочку AND'ов.
     if ((ins.bin_op == B::Eq || ins.bin_op == B::NotEq)
         && (ati.kind == TypeInfo::Kind::Array
          || ati.kind == TypeInfo::Kind::Struct)) {

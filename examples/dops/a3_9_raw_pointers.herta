@@ -44,6 +44,19 @@ fn main() int32 {
     assert(*back == 777);
     print(*back);
 
+    // Значения byte: создаются и рассматриваются только явным cast'ом,
+    // сравниваются на == / != — арифметики и порядка нет.
+    var b: byte = byte(200);
+    let c: byte = byte(200);
+    assert(b == c);
+    assert(b != byte(0));
+    assert(uint8(b) == 200);      // числовой код — через явный cast
+
+    // Запись и чтение через *byte.
+    let pb: *byte = &b;
+    *pb = byte(7);
+    assert(uint8(b) == 7);
+
     print("a3.9 ok");
     return 0;
 }

@@ -192,8 +192,8 @@ void test_methods() {
         module m;
         struct P { x: int32 }
         impl P {
-            fn make(v: int32) P { return P { x: v }; }
-            fn get(self: P) int32 { return self.x; }
+            pub fn make(v: int32) P { return P { x: v }; }
+            pub fn get(self: P) int32 { return self.x; }
         }
         fn main() int32 {
             let p: P = P.make(7);
@@ -230,6 +230,42 @@ void test_string_concat() {
 }
 
 
+// Регрессия БАГ-1: одноимённые переменные из разных блоков не должны
+// сливаться в одну IR-переменную.
+void test_shadowing_unique_names() {
+    auto ir = lower(R"(
+        module m;
+        fn main() int32 {
+            var x: int32 = 1;
+            {
+                var x: int32 = 2;
+                print(x);
+            }
+            print(x);
+            return 0;
+        }
+    )", "shadow", /*main=*/true);
+    contains("shadow", ir, "x = ");
+    contains("shadow", ir, "x.1 = ");
+}
+
+// Регрессия БАГ-2: a.b.c = v должно писаться назад в корневую переменную
+// (read-modify-write-back), а не только во временную копию.
+void test_nested_field_writeback() {
+    auto ir = lower(R"(
+        module m;
+        struct Inner { c: int32 }
+        struct Outer { b: Inner }
+        fn main() int32 {
+            var a: Outer = Outer { b: Inner { c: 1 } };
+            a.b.c = 42;
+            return a.b.c;
+        }
+    )", "writeback", /*main=*/true);
+    // Финальный шаг write-back: поле b корневой переменной перезаписывается.
+    contains("writeback", ir, "a.b = %t");
+}
+
 void test_void_call_no_dst() {
     auto ir = lower(R"(
         module m;
@@ -256,6 +292,8 @@ int main() {
     test_methods();
     test_namespace_call();
     test_string_concat();
+    test_shadowing_unique_names();
+    test_nested_field_writeback();
     test_void_call_no_dst();
 
     if (failures == 0) {

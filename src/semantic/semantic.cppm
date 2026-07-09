@@ -90,9 +90,15 @@ struct ArrayTy {
     std::int64_t size = 0;
 };
 
+export struct FieldInfo {
+    std::string name;
+    Type type;
+    bool is_priv = false;  // priv-поле доступно только методам своего типа
+};
+
 struct StructTy {
     std::string name;
-    std::vector<std::pair<std::string, Type>> fields;
+    std::vector<FieldInfo> fields;
     SourceLocation loc;
 };
 
@@ -219,7 +225,11 @@ bool can_explicit_cast(const Type& from, const Type& to) noexcept {
     if (a == Primitive::Bool || b == Primitive::Bool) return false;
     if (a == Primitive::String || b == Primitive::String) return false;
     if (a == Primitive::Void || b == Primitive::Void) return false;
-    if (a == Primitive::Byte || b == Primitive::Byte) return false;  // byte не арифметический
+    // byte не арифметический, но явно конвертируется в целые и обратно —
+    // иначе значение byte невозможно ни создать, ни рассмотреть.
+    if (a == Primitive::Byte && is_int(b)) return true;
+    if (is_int(a) && b == Primitive::Byte) return true;
+    if (a == Primitive::Byte || b == Primitive::Byte) return false;
     // char ↔ int/uint — это получение/установка числового кода символа.
     if (a == Primitive::Char && is_int(b)) return true;
     if (is_int(a) && b == Primitive::Char) return true;
@@ -234,6 +244,18 @@ std::optional<Primitive> common_arith(Primitive a, Primitive b) noexcept {
     if (can_widen_prim(a, b)) return b;
     if (can_widen_prim(b, a)) return a;
     return std::nullopt;
+}
+
+// Имена встроенных функций зарезервированы: объявить переменную, функцию
+// или тип с таким именем нельзя — иначе затенение молча ломает builtin.
+bool is_reserved_builtin(std::string_view name) noexcept {
+    constexpr std::string_view kBuiltins[] = {
+        "print", "input", "exit", "panic", "assert", "len", "sleep_ms",
+        "int_to_string", "float_to_string", "parse_int", "parse_float",
+        "inf", "nan",
+    };
+    for (auto b : kBuiltins) if (b == name) return true;
+    return false;
 }
 
 // Помещается ли литерал в целевой целочисленный тип?
@@ -251,6 +273,21 @@ bool int_fits(std::int64_t v, Primitive target) noexcept {
         case Primitive::U64: return v >= 0;
         default: return false;
     }
+}
+
+// Тип из суффикса числового литерала ("i8".."u64", "f32"/"f64").
+std::optional<Primitive> suffix_to_prim(std::string_view s) noexcept {
+    if (s == "i8")  return Primitive::I8;
+    if (s == "i16") return Primitive::I16;
+    if (s == "i32") return Primitive::I32;
+    if (s == "i64") return Primitive::I64;
+    if (s == "u8")  return Primitive::U8;
+    if (s == "u16") return Primitive::U16;
+    if (s == "u32") return Primitive::U32;
+    if (s == "u64") return Primitive::U64;
+    if (s == "f32") return Primitive::F32;
+    if (s == "f64") return Primitive::F64;
+    return std::nullopt;
 }
 
 }  // anonymous
@@ -274,11 +311,12 @@ export struct Symbol {
 // привязанной к идентичности StructTy через shared_ptr.
 export struct MethodInfo {
     std::string name;
+    std::string module;      // модуль, в котором объявлен impl (для кросс-модульных вызовов)
     std::vector<Type> param_types;
     std::vector<std::string> param_names;
     Type return_type;
     bool is_static = false;  // true — первый параметр не self
-    bool is_pub = false;
+    bool is_pub = false;     // без pub метод доступен только методам своего типа
     SourceLocation loc;
     const ast::FnDecl* ast_node = nullptr;
 };
@@ -317,11 +355,16 @@ public:
     // фрагментов, в которых fn main() нет.
     // imports — карта "имя импортированного модуля → его публичный scope".
     // Pub-фильтрация делается на стороне получателя.
+    // imported_methods — методы impl-блоков ранее обработанных модулей
+    // (ключ — идентичность StructTy). Нужны для вызова методов на значениях
+    // импортированных типов.
     SemanticAnalyzer(const ast::Program& prog,
                      std::string_view filename,
                      DiagnosticSink& sink,
                      std::unordered_map<std::string, std::shared_ptr<Scope>> imports = {},
-                     bool require_main = true);
+                     bool require_main = true,
+                     std::unordered_map<StructTy*, std::vector<MethodInfo>>
+                         imported_methods = {});
 
     bool analyze();
 
@@ -348,6 +391,18 @@ public:
         return imports_;
     }
 
+    // Side-table: тип возврата каждой функции (включая выведенные по return
+    // и методы impl). Используется lowering вместо повторного разбора AST.
+    const std::unordered_map<const ast::FnDecl*, Type>& fn_return_types() const noexcept {
+        return fn_return_types_;
+    }
+
+    // Side-table: разрешённый тип каждого TypeExpr (алиасы и квалифицированные
+    // имена уже раскрыты). Используется lowering для канонических строк типов.
+    const std::unordered_map<const ast::TypeExpr*, Type>& type_expr_types() const noexcept {
+        return type_expr_types_;
+    }
+
 private:
     bool process_decls(const std::vector<std::unique_ptr<ast::Decl>>& decls,
                        Scope& target);
@@ -360,6 +415,27 @@ private:
     bool process_impl_bodies(const ast::ImplDecl&, Scope&);
 
     std::optional<Type> resolve_type(const ast::TypeExpr&, Scope&);
+
+    // Разрешение квалифицированного имени (a / a.b / a.b.c) по цепочке
+    // namespace/модулей с проверкой pub при пересечении границы модуля.
+    struct ChainHit {
+        const Symbol* sym = nullptr;  // финальный символ
+        std::string path;             // полное имя для диагностик ("M.NS.f")
+    };
+    enum class ChainStatus { Found, NotChain, Error };
+    ChainStatus resolve_chain(const ast::Expr& e, Scope& scope, ChainHit& out);
+    // То же по готовому списку частей имени (для типов "M.NS.T").
+    ChainStatus resolve_chain_parts(std::span<const std::string> parts,
+                                    SourceLocation loc, Scope& scope,
+                                    ChainHit& out);
+
+    // Вывод типа возврата функции по её телу (A.1.7). params уже разрешены.
+    std::optional<Type> infer_return_type(const ast::FnDecl& fd, Scope& target,
+                                          const std::vector<Type>& param_types,
+                                          StructTy* impl_type);
+
+    // Проверка «имя не является зарезервированным builtin'ом».
+    bool check_not_builtin(std::string_view name, SourceLocation loc);
 
     bool check_block(const ast::BlockStmt&, Scope& parent);
     bool check_stmt(const ast::Stmt&, Scope&);
@@ -398,11 +474,20 @@ private:
     Type current_return_type_{Primitive::Void};
     int loop_depth_ = 0;
     bool require_main_ = true;
+    // Тип, метод которого сейчас проверяется (для priv-полей и приватных
+    // методов: они доступны только из методов своего типа).
+    StructTy* current_impl_type_ = nullptr;
+    // Режим вывода типа возврата (A.1.7): check_return копит тип сюда.
+    bool inferring_return_ = false;
+    std::optional<Type> inferred_return_;
     std::unordered_map<std::string, std::shared_ptr<Scope>> imports_;
     // impl-методы: ключ — указатель на StructTy (нестираемая идентичность).
     std::unordered_map<StructTy*, std::vector<MethodInfo>> methods_;
     // Side-table: тип каждой проверенной AST-Expr (см. expression_types()).
     std::unordered_map<const ast::Expr*, Type> expr_types_;
+    // Side-tables для lowering: типы возврата функций и разрешённые TypeExpr.
+    std::unordered_map<const ast::FnDecl*, Type> fn_return_types_;
+    std::unordered_map<const ast::TypeExpr*, Type> type_expr_types_;
     // Где начинаются методы каждого impl-блока внутри methods_[StructTy*].
     // Нужно потому, что для одного типа допустимо несколько impl-блоков, и
     // process_impl_bodies должен сопоставить fn.body ↔ MethodInfo по индексу
@@ -414,11 +499,14 @@ SemanticAnalyzer::SemanticAnalyzer(const ast::Program& prog,
                                    std::string_view filename,
                                    DiagnosticSink& sink,
                                    std::unordered_map<std::string, std::shared_ptr<Scope>> imports,
-                                   bool require_main)
+                                   bool require_main,
+                                   std::unordered_map<StructTy*, std::vector<MethodInfo>>
+                                       imported_methods)
     : prog_(prog), filename_(filename), sink_(sink),
       global_scope_(*shared_scope_),
       require_main_(require_main),
-      imports_(std::move(imports)) {
+      imports_(std::move(imports)),
+      methods_(std::move(imported_methods)) {
     auto add_type = [&](std::string n, Primitive p) {
         Symbol s; s.kind = Symbol::Kind::TypeName; s.name = std::move(n);
         s.type = Type(p);
@@ -492,20 +580,19 @@ bool SemanticAnalyzer::analyze() {
 
     if (!require_main_) return !sink_.has_errors();
 
-    // Проверка точки входа: должна существовать функция main(),
-    // без параметров, возвращающая любой целочисленный тип.
+    // Проверка точки входа: fn main() int32 (строго по спецификации §12).
     auto main_sym = global_scope_.lookup_local("main");
     if (!main_sym || main_sym->kind != Symbol::Kind::Fn) {
-        error({}, "program must declare 'fn main(...) <int-type> { ... }'");
+        error({}, "program must declare 'fn main() int32 { ... }'");
         return false;
     }
     if (!main_sym->param_types.empty()) {
         error(main_sym->loc, "'main' must take no parameters");
         return false;
     }
-    if (!main_sym->type.is_primitive() || !is_int(main_sym->type.prim())) {
+    if (!main_sym->type.is(Primitive::I32)) {
         error(main_sym->loc, std::format(
-            "'main' must return an integer type, got '{}'",
+            "'main' must return 'int32', got '{}'",
             main_sym->type.to_string()));
         return false;
     }
@@ -550,6 +637,7 @@ bool SemanticAnalyzer::process_decls(
 }
 
 bool SemanticAnalyzer::process_struct(const ast::StructDecl& sd, Scope& target) {
+    if (!check_not_builtin(sd.name, sd.loc)) return false;
     auto st = std::make_shared<StructTy>();
     st->name = sd.name;
     st->loc = sd.loc;
@@ -565,7 +653,7 @@ bool SemanticAnalyzer::process_struct(const ast::StructDecl& sd, Scope& target) 
             error(f.loc, "field cannot have type 'void'");
             return false;
         }
-        st->fields.emplace_back(f.name, std::move(*t));
+        st->fields.push_back(FieldInfo{f.name, std::move(*t), f.is_priv});
     }
     Symbol s; s.kind = Symbol::Kind::TypeName; s.name = sd.name;
     s.loc = sd.loc; s.type = Type(std::move(st)); s.is_pub = sd.is_pub;
@@ -578,6 +666,7 @@ bool SemanticAnalyzer::process_struct(const ast::StructDecl& sd, Scope& target) 
 
 bool SemanticAnalyzer::process_type_alias(const ast::TypeAliasDecl& ad,
                                           Scope& target) {
+    if (!check_not_builtin(ad.name, ad.loc)) return false;
     auto t = resolve_type(*ad.target, target);
     if (!t) return false;
     Symbol s; s.kind = Symbol::Kind::TypeName; s.name = ad.name;
@@ -590,9 +679,11 @@ bool SemanticAnalyzer::process_type_alias(const ast::TypeAliasDecl& ad,
 }
 
 bool SemanticAnalyzer::process_fn_signature(const ast::FnDecl& fd, Scope& target) {
+    if (!check_not_builtin(fd.name, fd.loc)) return false;
     Symbol s; s.kind = Symbol::Kind::Fn; s.name = fd.name; s.loc = fd.loc;
     s.is_pub = fd.is_pub;
     for (const auto& p : fd.params) {
+        if (!check_not_builtin(p.name, p.loc)) return false;
         auto t = resolve_type(*p.type, target);
         if (!t) return false;
         if (t->is_void()) {
@@ -601,14 +692,58 @@ bool SemanticAnalyzer::process_fn_signature(const ast::FnDecl& fd, Scope& target
         }
         s.param_types.push_back(std::move(*t));
     }
-    auto rt = resolve_type(*fd.return_type, target);
-    if (!rt) return false;
-    s.type = std::move(*rt);
+    if (fd.return_type) {
+        auto rt = resolve_type(*fd.return_type, target);
+        if (!rt) return false;
+        s.type = std::move(*rt);
+    } else {
+        // A.1.7: тип возврата выводится по return-инструкциям тела.
+        auto rt = infer_return_type(fd, target, s.param_types,
+                                    /*impl_type=*/nullptr);
+        if (!rt) return false;
+        s.type = std::move(*rt);
+    }
+    fn_return_types_[&fd] = s.type;
     if (!target.declare(std::move(s))) {
         error(fd.loc, "redeclaration of name '" + fd.name + "'");
         return false;
     }
     return true;
+}
+
+// Вывод типа возврата (A.1.7): тело проверяется в режиме инференции, все
+// return-инструкции обязаны сходиться к одному типу; тело без return —
+// void. Функция с выводимым типом видит только объявления выше по файлу.
+std::optional<Type> SemanticAnalyzer::infer_return_type(
+        const ast::FnDecl& fd, Scope& target,
+        const std::vector<Type>& param_types, StructTy* impl_type) {
+    auto saved_ret = current_return_type_;
+    auto saved_inferring = inferring_return_;
+    auto saved_inferred = inferred_return_;
+    auto saved_impl = current_impl_type_;
+    inferring_return_ = true;
+    inferred_return_ = std::nullopt;
+    current_impl_type_ = impl_type;
+
+    auto fn_scope = std::make_unique<Scope>(&target);
+    for (std::size_t i = 0; i < fd.params.size(); ++i) {
+        Symbol p; p.kind = Symbol::Kind::Var;
+        p.name = fd.params[i].name;
+        p.loc = fd.params[i].loc;
+        p.type = param_types[i];
+        p.is_mutable = true;
+        fn_scope->declare(std::move(p));
+    }
+    bool ok = check_block(*fd.body, *fn_scope);
+    auto result = inferred_return_;
+
+    current_return_type_ = saved_ret;
+    inferring_return_ = saved_inferring;
+    inferred_return_ = saved_inferred;
+    current_impl_type_ = saved_impl;
+
+    if (!ok) return std::nullopt;
+    return result.value_or(Type(Primitive::Void));
 }
 
 bool SemanticAnalyzer::process_fn_body(const ast::FnDecl& fd, Scope& target) {
@@ -640,6 +775,7 @@ bool SemanticAnalyzer::process_fn_body(const ast::FnDecl& fd, Scope& target) {
 
 bool SemanticAnalyzer::process_namespace(const ast::NamespaceDecl& nd,
                                          Scope& target) {
+    if (!check_not_builtin(nd.name, nd.loc)) return false;
     auto ns = std::make_shared<Scope>(&target);
     if (!process_decls(nd.members, *ns)) return false;
     Symbol s; s.kind = Symbol::Kind::Namespace; s.name = nd.name; s.loc = nd.loc;
@@ -670,12 +806,14 @@ bool SemanticAnalyzer::process_impl_signatures(const ast::ImplDecl& im,
     for (const auto& fn : im.methods) {
         MethodInfo info;
         info.name = fn->name;
+        info.module = prog_.module_name;
         info.loc = fn->loc;
         info.is_pub = fn->is_pub;
         info.ast_node = fn.get();
 
         for (std::size_t i = 0; i < fn->params.size(); ++i) {
             const auto& p = fn->params[i];
+            if (!check_not_builtin(p.name, p.loc)) return false;
             auto t = resolve_type(*p.type, target);
             if (!t) return false;
             if (t->is_void()) {
@@ -696,9 +834,16 @@ bool SemanticAnalyzer::process_impl_signatures(const ast::ImplDecl& im,
         info.is_static = !(info.param_names.size() >= 1
                             && info.param_names[0] == "self");
 
-        auto rt = resolve_type(*fn->return_type, target);
-        if (!rt) return false;
-        info.return_type = std::move(*rt);
+        if (fn->return_type) {
+            auto rt = resolve_type(*fn->return_type, target);
+            if (!rt) return false;
+            info.return_type = std::move(*rt);
+        } else {
+            auto rt = infer_return_type(*fn, target, info.param_types, st_ptr);
+            if (!rt) return false;
+            info.return_type = std::move(*rt);
+        }
+        fn_return_types_[fn.get()] = info.return_type;
 
         // Дубли запрещены среди методов одного типа.
         for (const auto& existing : methods_[st_ptr]) {
@@ -726,7 +871,9 @@ bool SemanticAnalyzer::process_impl_bodies(const ast::ImplDecl& im,
         const auto& fn = *im.methods[k];
         const auto& info = infos[base + k];
         auto saved_ret = current_return_type_;
+        auto saved_impl = current_impl_type_;
         current_return_type_ = info.return_type;
+        current_impl_type_ = st_ptr;  // priv-члены типа доступны в теле метода
 
         auto fn_scope = std::make_unique<Scope>(&target);
         for (std::size_t i = 0; i < fn.params.size(); ++i) {
@@ -739,27 +886,115 @@ bool SemanticAnalyzer::process_impl_bodies(const ast::ImplDecl& im,
                 error(fn.params[i].loc,
                       "duplicate parameter name '" + fn.params[i].name + "'");
                 current_return_type_ = saved_ret;
+                current_impl_type_ = saved_impl;
                 return false;
             }
         }
-        if (!check_block(*fn.body, *fn_scope)) {
-            current_return_type_ = saved_ret;
-            return false;
-        }
+        bool ok = check_block(*fn.body, *fn_scope);
         current_return_type_ = saved_ret;
+        current_impl_type_ = saved_impl;
+        if (!ok) return false;
     }
     return true;
 }
 
+namespace {
+// Разбивает "M.NS.T" на части по точкам.
+std::vector<std::string> split_dotted(std::string_view s) {
+    std::vector<std::string> parts;
+    while (true) {
+        auto dot = s.find('.');
+        if (dot == std::string_view::npos) {
+            parts.emplace_back(s);
+            return parts;
+        }
+        parts.emplace_back(s.substr(0, dot));
+        s.remove_prefix(dot + 1);
+    }
+}
+}  // anonymous
+
+// Разрешение цепочки имён a.b.c по namespace/модулям. При пересечении
+// границы модуля каждый следующий член обязан быть pub (semantics.md §14).
+SemanticAnalyzer::ChainStatus SemanticAnalyzer::resolve_chain_parts(
+        std::span<const std::string> parts, SourceLocation loc,
+        Scope& scope, ChainHit& out) {
+    auto sym = scope.lookup(parts[0]);
+    if (!sym) return ChainStatus::NotChain;
+    bool crossed_module = false;
+    std::string path = parts[0];
+    for (std::size_t i = 1; i < parts.size(); ++i) {
+        if (sym->kind != Symbol::Kind::Namespace
+            && sym->kind != Symbol::Kind::Module) {
+            return ChainStatus::NotChain;  // например, переменная.поле
+        }
+        crossed_module = crossed_module || sym->kind == Symbol::Kind::Module;
+        auto m = sym->ns_scope->lookup_local(parts[i]);
+        if (!m) {
+            error(loc, std::string(sym->kind == Symbol::Kind::Module
+                                   ? "module '" : "namespace '") +
+                       path + "' has no member '" + parts[i] + "'");
+            return ChainStatus::Error;
+        }
+        if (crossed_module && !m->is_pub) {
+            error(loc, "'" + parts[i] + "' is not exported from '" + path + "'");
+            return ChainStatus::Error;
+        }
+        path += '.';
+        path += parts[i];
+        sym = m;
+    }
+    out.sym = sym;
+    out.path = std::move(path);
+    return ChainStatus::Found;
+}
+
+SemanticAnalyzer::ChainStatus SemanticAnalyzer::resolve_chain(
+        const ast::Expr& e, Scope& scope, ChainHit& out) {
+    // Собираем части цепочки; не-идентификаторные базы — не цепочка имён.
+    std::vector<std::string> parts;
+    const ast::Expr* cur = &e;
+    while (auto* fe = dynamic_cast<const ast::FieldExpr*>(cur)) {
+        parts.push_back(fe->field);
+        cur = fe->base.get();
+    }
+    auto* id = dynamic_cast<const ast::IdentExpr*>(cur);
+    if (!id) return ChainStatus::NotChain;
+    parts.push_back(id->name);
+    std::ranges::reverse(parts);
+    return resolve_chain_parts(parts, e.loc, scope, out);
+}
+
 std::optional<Type> SemanticAnalyzer::resolve_type(const ast::TypeExpr& te,
                                                    Scope& scope) {
+    auto record = [&](std::optional<Type> t) -> std::optional<Type> {
+        if (t) type_expr_types_[&te] = *t;
+        return t;
+    };
     if (auto* nt = dynamic_cast<const ast::NamedType*>(&te)) {
+        // Квалифицированное имя: Module.Type / Module.Namespace.Type.
+        if (nt->name.find('.') != std::string::npos) {
+            auto parts = split_dotted(nt->name);
+            ChainHit hit;
+            switch (resolve_chain_parts(parts, nt->loc, scope, hit)) {
+                case ChainStatus::Error: return std::nullopt;
+                case ChainStatus::NotChain:
+                    error(nt->loc, "unknown type '" + nt->name + "'");
+                    return std::nullopt;
+                case ChainStatus::Found: break;
+            }
+            if (hit.sym->kind != Symbol::Kind::TypeName) {
+                error(nt->loc, "'" + nt->name + "' is not a type");
+                return std::nullopt;
+            }
+            return record(hit.sym->type);
+        }
         auto sym = scope.lookup(nt->name);
         if (!sym || sym->kind != Symbol::Kind::TypeName) {
             error(nt->loc, "unknown type '" + nt->name + "'");
             return std::nullopt;
         }
-        return sym->type;
+        return record(sym->type);
     }
     if (auto* at = dynamic_cast<const ast::ArrayType*>(&te)) {
         auto elem = resolve_type(*at->element, scope);
@@ -775,7 +1010,7 @@ std::optional<Type> SemanticAnalyzer::resolve_type(const ast::TypeExpr& te,
         auto a = std::make_shared<ArrayTy>();
         a->element = std::move(*elem);
         a->size = at->size;
-        return Type(std::move(a));
+        return record(Type(std::move(a)));
     }
     // *T — указатель. *void и *byte считаются сырыми указателями.
     if (auto* pt = dynamic_cast<const ast::PointerType*>(&te)) {
@@ -784,7 +1019,7 @@ std::optional<Type> SemanticAnalyzer::resolve_type(const ast::TypeExpr& te,
         auto p = std::make_shared<PointerTy>();
         p->pointee = std::move(*pointee);
         p->is_raw = p->pointee.is(Primitive::Void) || p->pointee.is(Primitive::Byte);
-        return Type(std::move(p));
+        return record(Type(std::move(p)));
     }
     error(te.loc, "unsupported type expression");
     return std::nullopt;
@@ -827,7 +1062,16 @@ bool SemanticAnalyzer::check_stmt(const ast::Stmt& s, Scope& scope) {
     return false;
 }
 
+bool SemanticAnalyzer::check_not_builtin(std::string_view name,
+                                         SourceLocation loc) {
+    if (!is_reserved_builtin(name)) return true;
+    error(loc, std::format(
+        "'{}' is a builtin name and cannot be used as an identifier", name));
+    return false;
+}
+
 bool SemanticAnalyzer::check_var_decl(const ast::VarDeclStmt& v, Scope& scope) {
+    if (!check_not_builtin(v.name, v.loc)) return false;
     Type var_type;
     if (v.type) {
         auto t = resolve_type(*v.type, scope);
@@ -901,6 +1145,27 @@ bool SemanticAnalyzer::check_assign(const ast::AssignStmt& a, Scope& scope) {
 }
 
 bool SemanticAnalyzer::check_return(const ast::ReturnStmt& r, Scope& scope) {
+    // Режим вывода типа возврата (A.1.7): типы всех return должны совпадать.
+    if (inferring_return_) {
+        Type t{Primitive::Void};
+        if (r.value) {
+            auto v = check_expr(*r.value, scope);
+            if (!v) return false;
+            t = std::move(*v);
+        }
+        if (!inferred_return_) {
+            inferred_return_ = t;
+            return true;
+        }
+        if (!inferred_return_->same_as(t)) {
+            error(r.loc, std::format(
+                "conflicting return types in function with inferred return "
+                "type: '{}' vs '{}'",
+                inferred_return_->to_string(), t.to_string()));
+            return false;
+        }
+        return true;
+    }
     if (!r.value) {
         if (!current_return_type_.is_void()) {
             error(r.loc, "'return' without value in function returning '" +
@@ -957,8 +1222,40 @@ std::optional<Type> SemanticAnalyzer::check_expr(const ast::Expr& e, Scope& scop
         if (t) expr_types_[&e] = *t;
         return t;
     };
-    if (dynamic_cast<const ast::IntLit*>(&e))    return record(Type(Primitive::I32));
-    if (dynamic_cast<const ast::FloatLit*>(&e))  return record(Type(Primitive::F64));
+    if (auto* il = dynamic_cast<const ast::IntLit*>(&e)) {
+        // Суффикс задаёт тип литерала явно; без суффикса — int32, а если
+        // значение в int32 не помещается — int64 (uint64 для значений выше
+        // int64::max, доступных только этому типу).
+        if (!il->suffix.empty()) {
+            auto p = suffix_to_prim(il->suffix);
+            if (!p) {
+                error(e.loc, "invalid literal suffix '" + il->suffix + "'");
+                return std::nullopt;
+            }
+            bool fits = il->u64_only ? (*p == Primitive::U64)
+                                     : int_fits(il->value, *p);
+            if (!fits) {
+                error(e.loc, std::format(
+                    "integer literal does not fit in '{}'", Type(*p).to_string()));
+                return std::nullopt;
+            }
+            return record(Type(*p));
+        }
+        if (il->u64_only) return record(Type(Primitive::U64));
+        return record(Type(int_fits(il->value, Primitive::I32)
+                               ? Primitive::I32 : Primitive::I64));
+    }
+    if (auto* fl = dynamic_cast<const ast::FloatLit*>(&e)) {
+        if (fl->suffix == "f32") {
+            if (std::isfinite(fl->value)
+                && std::abs(fl->value) > std::numeric_limits<float>::max()) {
+                error(e.loc, "float literal does not fit in 'float32'");
+                return std::nullopt;
+            }
+            return record(Type(Primitive::F32));
+        }
+        return record(Type(Primitive::F64));
+    }
     if (dynamic_cast<const ast::BoolLit*>(&e))   return record(Type(Primitive::Bool));
     if (dynamic_cast<const ast::StringLit*>(&e)) return record(Type(Primitive::String));
     if (dynamic_cast<const ast::CharLit*>(&e))   return record(Type(Primitive::Char));
@@ -990,19 +1287,21 @@ std::optional<Type> SemanticAnalyzer::check_expr(const ast::Expr& e, Scope& scop
         return record(Type(std::move(p)));
     }
     if (auto* ao = dynamic_cast<const ast::AddressOfExpr*>(&e)) {
-        // &x: x должен быть lvalue (Ident/Field/Index/Deref), результат — *T.
-        // &fn — взятие адреса функции, должно бы давать FnPointerTy. Пока не
-        // реализовано, поэтому ругаемся явно.
-        if (auto* id = dynamic_cast<const ast::IdentExpr*>(ao->operand.get())) {
-            auto sym = scope.lookup(id->name);
-            if (sym && sym->kind == Symbol::Kind::Fn) {
-                error(ao->loc,
-                      "function pointers are not yet supported (use direct call)");
-                return std::nullopt;
-            }
+        // &x допустим только на целой переменной: адрес поля или элемента
+        // массива указывал бы на временную копию (value semantics), и запись
+        // через такой указатель молча терялась бы. Честная реализация
+        // требует lvalue-адресации в IR; до неё — ошибка компиляции.
+        auto* id = dynamic_cast<const ast::IdentExpr*>(ao->operand.get());
+        if (!id) {
+            error(ao->loc,
+                  "'&' is supported only on whole variables; take the address "
+                  "of the variable and access parts through it");
+            return std::nullopt;
         }
-        if (!is_lvalue(*ao->operand)) {
-            error(ao->loc, "'&' requires an lvalue (variable or field/index of one)");
+        auto sym = scope.lookup(id->name);
+        if (sym && sym->kind == Symbol::Kind::Fn) {
+            error(ao->loc,
+                  "function pointers are not yet supported (use direct call)");
             return std::nullopt;
         }
         auto inner = check_expr(*ao->operand, scope);
@@ -1036,8 +1335,19 @@ std::optional<Type> SemanticAnalyzer::check_expr_ctx(const ast::Expr& e,
         expr_types_[&e] = t;
         return t;
     };
-    // Литерал → подгоняем к контексту.
-    if (auto* il = dynamic_cast<const ast::IntLit*>(&e)) {
+    // Хелпер: помещается ли значение вещественного литерала в тип ctx.
+    auto float_fits_ctx = [&](double v, SourceLocation loc) -> bool {
+        if (ctx.is(Primitive::F32) && std::isfinite(v)
+            && std::abs(v) > std::numeric_limits<float>::max()) {
+            error(loc, "float literal does not fit in 'float32'");
+            return false;
+        }
+        return true;
+    };
+    // Литерал → подгоняем к контексту. Литералы с суффиксом уже типизированы
+    // и адаптации не подлежат (идут по общему пути с неявным приведением).
+    if (auto* il = dynamic_cast<const ast::IntLit*>(&e);
+        il && il->suffix.empty() && !il->u64_only) {
         if (ctx.is_primitive() && is_int(ctx.prim())) {
             if (int_fits(il->value, ctx.prim())) return record(ctx);
             error(e.loc, std::format(
@@ -1049,7 +1359,9 @@ std::optional<Type> SemanticAnalyzer::check_expr_ctx(const ast::Expr& e,
     }
     if (auto* un = dynamic_cast<const ast::UnaryExpr*>(&e);
         un && un->op == ast::UnaryOp::Neg) {
-        if (auto* il = dynamic_cast<const ast::IntLit*>(un->operand.get())) {
+        // -<целый литерал>: адаптируется и к целому, и к вещественному ctx.
+        if (auto* il = dynamic_cast<const ast::IntLit*>(un->operand.get());
+            il && il->suffix.empty() && !il->u64_only) {
             if (ctx.is_primitive() && is_int(ctx.prim())) {
                 if (int_fits(-il->value, ctx.prim())) {
                     expr_types_[un->operand.get()] = ctx;  // вложенный IntLit
@@ -1060,10 +1372,27 @@ std::optional<Type> SemanticAnalyzer::check_expr_ctx(const ast::Expr& e,
                     -il->value, ctx.to_string()));
                 return std::nullopt;
             }
+            if (ctx.is_primitive() && is_float(ctx.prim())) {
+                expr_types_[un->operand.get()] = ctx;
+                return record(ctx);
+            }
+        }
+        // -<вещественный литерал>: симметрично положительному (fix Н-5).
+        if (auto* fl = dynamic_cast<const ast::FloatLit*>(un->operand.get());
+            fl && fl->suffix.empty()) {
+            if (ctx.is_primitive() && is_float(ctx.prim())) {
+                if (!float_fits_ctx(fl->value, e.loc)) return std::nullopt;
+                expr_types_[un->operand.get()] = ctx;
+                return record(ctx);
+            }
         }
     }
-    if (dynamic_cast<const ast::FloatLit*>(&e)) {
-        if (ctx.is_primitive() && is_float(ctx.prim())) return record(ctx);
+    if (auto* fl = dynamic_cast<const ast::FloatLit*>(&e);
+        fl && fl->suffix.empty()) {
+        if (ctx.is_primitive() && is_float(ctx.prim())) {
+            if (!float_fits_ctx(fl->value, e.loc)) return std::nullopt;
+            return record(ctx);
+        }
     }
     // Литерал массива — каждый элемент в контексте element_type.
     if (auto* al = dynamic_cast<const ast::ArrayLit*>(&e); al && ctx.is_array()) {
@@ -1139,6 +1468,36 @@ std::optional<Type> SemanticAnalyzer::check_binary(const ast::BinaryExpr& b,
     // Bool == / !=
     if ((op == Op::Eq || op == Op::NotEq) && a->is_bool() && c->is_bool()) {
         return Type(Primitive::Bool);
+    }
+    // Указатели: == и != (включая сравнение с null). Типизированные
+    // указатели сравнимы при совпадении pointee; raw (*void/*byte) — с любым.
+    if ((op == Op::Eq || op == Op::NotEq) && a->is_pointer() && c->is_pointer()) {
+        bool compatible = a->pointer().is_raw || c->pointer().is_raw
+                       || a->pointer().pointee.same_as(c->pointer().pointee);
+        if (!compatible) {
+            error(b.loc, std::format(
+                "cannot compare pointers of different types: '{}' and '{}'",
+                a->to_string(), c->to_string()));
+            return std::nullopt;
+        }
+        return Type(Primitive::Bool);
+    }
+    if (a->is_pointer() || c->is_pointer()) {
+        error(b.loc, std::format(
+            "operator '{}' is not defined for pointers (only == and !=)",
+            to_string(op)));
+        return std::nullopt;
+    }
+    // byte: только == и != — тип не арифметический.
+    if ((op == Op::Eq || op == Op::NotEq)
+        && a->is(Primitive::Byte) && c->is(Primitive::Byte)) {
+        return Type(Primitive::Bool);
+    }
+    if (a->is(Primitive::Byte) || c->is(Primitive::Byte)) {
+        error(b.loc, std::format(
+            "operator '{}' is not defined for byte (only == and != are allowed)",
+            to_string(op)));
+        return std::nullopt;
     }
     // У char доступны только == и !=, потому что он не арифметический.
     if ((op == Op::Eq || op == Op::NotEq)
@@ -1223,29 +1582,15 @@ std::optional<Type> SemanticAnalyzer::check_index(const ast::IndexExpr& e,
 
 std::optional<Type> SemanticAnalyzer::check_field(const ast::FieldExpr& e,
                                                   Scope& scope) {
-    // Возможен: namespace.x | module.x | struct_value.field.
-    if (auto* id = dynamic_cast<const ast::IdentExpr*>(e.base.get())) {
-        auto sym = scope.lookup(id->name);
-        if (sym && (sym->kind == Symbol::Kind::Namespace
-                 || sym->kind == Symbol::Kind::Module)) {
-            auto m = sym->ns_scope->lookup_local(e.field);
-            if (!m) {
-                error(e.loc, std::string(sym->kind == Symbol::Kind::Module
-                                         ? "module '" : "namespace '") +
-                              id->name + "' has no member '" + e.field + "'");
-                return std::nullopt;
-            }
-            // Для модулей применяем фильтрацию по pub.
-            if (sym->kind == Symbol::Kind::Module && !m->is_pub) {
-                error(e.loc, "'" + e.field + "' is not exported from module '" +
-                             id->name + "'");
-                return std::nullopt;
-            }
-            if (m->kind == Symbol::Kind::Var) return m->type;
-            error(e.loc, "cannot use '" + id->name + "." + e.field +
-                         "' as a value here");
+    // Возможен: namespace.x | module.x | module.ns.x | struct_value.field.
+    ChainHit hit;
+    switch (resolve_chain(e, scope, hit)) {
+        case ChainStatus::Error: return std::nullopt;
+        case ChainStatus::Found:
+            if (hit.sym->kind == Symbol::Kind::Var) return hit.sym->type;
+            error(e.loc, "cannot use '" + hit.path + "' as a value here");
             return std::nullopt;
-        }
+        case ChainStatus::NotChain: break;  // значение → доступ к полю
     }
     auto base = check_expr(*e.base, scope);
     if (!base) return std::nullopt;
@@ -1253,8 +1598,17 @@ std::optional<Type> SemanticAnalyzer::check_field(const ast::FieldExpr& e,
         error(e.loc, "field access requires struct, got '" + base->to_string() + "'");
         return std::nullopt;
     }
-    for (const auto& [name, type] : base->strukt().fields) {
-        if (name == e.field) return type;
+    for (const auto& f : base->strukt().fields) {
+        if (f.name == e.field) {
+            // priv-поле доступно только методам своего типа (A.2.12).
+            if (f.is_priv && current_impl_type_ != base->struct_ptr().get()) {
+                error(e.loc, "field '" + e.field + "' of struct '" +
+                             base->strukt().name +
+                             "' is private (accessible only from its methods)");
+                return std::nullopt;
+            }
+            return f.type;
+        }
     }
     error(e.loc, "struct '" + base->strukt().name + "' has no field '" + e.field + "'");
     return std::nullopt;
@@ -1303,59 +1657,83 @@ std::optional<Type> SemanticAnalyzer::check_call(const ast::CallExpr& e,
 
     // Резолвим callee:
     //   * IdentExpr — function | type-cast | builtin
-    //   * FieldExpr(IdentExpr, name) — namespace.x | Module.x | T.static_method | obj.method
+    //   * FieldExpr-цепочка имён — Module.x | NS.x | Module.NS.x |
+    //     T.static_method | Module.T.static_method
     //   * FieldExpr(<expr>, name) — method call на инстансе
     const Symbol* callee_sym = nullptr;
     std::string callee_name;
     SourceLocation callee_loc;
+
+    // Проверка доступа к методу: без pub метод приватен и доступен только
+    // из методов своего типа (ТЗ A.2.12).
+    auto method_access_ok = [&](const MethodInfo& m, StructTy* st,
+                                std::string_view type_name) -> bool {
+        if (m.is_pub || current_impl_type_ == st) return true;
+        error(e.loc, std::format(
+            "method '{}.{}' is private (accessible only from methods of '{}')",
+            type_name, m.name, type_name));
+        return false;
+    };
+    // Вызов статического метода st_ptr.field(args). nullopt — метода нет.
+    auto try_static_method = [&](StructTy* st_ptr, std::string_view type_name,
+                                 const std::string& mname)
+            -> std::optional<std::optional<Type>> {
+        auto it = methods_.find(st_ptr);
+        if (it == methods_.end()) return std::nullopt;
+        for (const auto& m : it->second) {
+            if (m.name != mname || !m.is_static) continue;
+            if (!method_access_ok(m, st_ptr, type_name))
+                return std::optional<std::optional<Type>>{std::optional<Type>{}};
+            if (e.args.size() != m.param_types.size()) {
+                error(e.loc, std::format(
+                    "method '{}.{}' expects {} arguments, got {}",
+                    type_name, m.name, m.param_types.size(), e.args.size()));
+                return std::optional<std::optional<Type>>{std::optional<Type>{}};
+            }
+            for (std::size_t i = 0; i < e.args.size(); ++i) {
+                if (!check_expr_ctx(*e.args[i], scope, m.param_types[i]))
+                    return std::optional<std::optional<Type>>{std::optional<Type>{}};
+            }
+            return std::optional<std::optional<Type>>{m.return_type};
+        }
+        return std::nullopt;
+    };
 
     if (auto* id = dynamic_cast<const ast::IdentExpr*>(e.callee.get())) {
         callee_sym = scope.lookup(id->name);
         callee_name = id->name;
         callee_loc = id->loc;
     } else if (auto* fe = dynamic_cast<const ast::FieldExpr*>(e.callee.get())) {
-        // Попытка 1: base — идентификатор → namespace / module / type.
-        if (auto* base_id = dynamic_cast<const ast::IdentExpr*>(fe->base.get())) {
-            auto base_sym = scope.lookup(base_id->name);
-            if (base_sym && (base_sym->kind == Symbol::Kind::Namespace
-                          || base_sym->kind == Symbol::Kind::Module)) {
-                auto m = base_sym->ns_scope->lookup_local(fe->field);
-                // Для Module применяем фильтрацию по pub
-                if (m && base_sym->kind == Symbol::Kind::Module && !m->is_pub) {
-                    error(fe->loc, "'" + fe->field + "' is not exported from module '" +
-                                   base_id->name + "'");
-                    return std::nullopt;
-                }
-                callee_sym = m;
-                callee_name = base_id->name + "." + fe->field;
+        // Попытка 1: вся цепочка — имя в namespace/модуле (функция или тип).
+        ChainHit hit;
+        switch (resolve_chain(*fe, scope, hit)) {
+            case ChainStatus::Error: return std::nullopt;
+            case ChainStatus::Found:
+                callee_sym = hit.sym;
+                callee_name = hit.path;
                 callee_loc = fe->loc;
-            }
-            // Статический метод: T.static(...)
-            if (!callee_sym && base_sym && base_sym->kind == Symbol::Kind::TypeName
-                && base_sym->type.is_struct()) {
-                auto* st_ptr = base_sym->type.struct_ptr().get();
-                auto it = methods_.find(st_ptr);
-                if (it != methods_.end()) {
-                    for (const auto& m : it->second) {
-                        if (m.name == fe->field && m.is_static) {
-                            if (e.args.size() != m.param_types.size()) {
-                                error(e.loc, std::format(
-                                    "method '{}.{}' expects {} arguments, got {}",
-                                    base_id->name, m.name, m.param_types.size(),
-                                    e.args.size()));
-                                return std::nullopt;
-                            }
-                            for (std::size_t i = 0; i < e.args.size(); ++i) {
-                                if (!check_expr_ctx(*e.args[i], scope, m.param_types[i]))
-                                    return std::nullopt;
-                            }
-                            return m.return_type;
-                        }
-                    }
+                break;
+            case ChainStatus::NotChain: break;
+        }
+        // Попытка 2: статический метод T.m(...) или Module.T.m(...):
+        // база цепочки — тип-структура.
+        if (!callee_sym) {
+            ChainHit base_hit;
+            auto base_stat = resolve_chain(*fe->base, scope, base_hit);
+            if (base_stat == ChainStatus::Error) return std::nullopt;
+            if (base_stat == ChainStatus::Found
+                && base_hit.sym->kind == Symbol::Kind::TypeName
+                && base_hit.sym->type.is_struct()) {
+                auto* st_ptr = base_hit.sym->type.struct_ptr().get();
+                if (auto r = try_static_method(st_ptr, base_hit.path, fe->field)) {
+                    return *r;
                 }
+                error(e.loc, "type '" + base_hit.path +
+                             "' has no static method '" + fe->field + "'");
+                return std::nullopt;
             }
         }
-        // Попытка 2: instance-метод на выражении: obj.method(args)
+        // Попытка 3: instance-метод на выражении: obj.method(args)
         if (!callee_sym) {
             auto base_ty = check_expr(*fe->base, scope);
             if (!base_ty) return std::nullopt;
@@ -1368,6 +1746,8 @@ std::optional<Type> SemanticAnalyzer::check_call(const ast::CallExpr& e,
             if (it != methods_.end()) {
                 for (const auto& m : it->second) {
                     if (m.name == fe->field && !m.is_static) {
+                        if (!method_access_ok(m, st_ptr, base_ty->to_string()))
+                            return std::nullopt;
                         std::size_t need = m.param_types.size() - 1;  // -self
                         if (e.args.size() != need) {
                             error(e.loc, std::format(
@@ -1440,7 +1820,9 @@ std::optional<Type> SemanticAnalyzer::check_builtin_print(const ast::CallExpr& e
     }
     auto t = check_expr(*e.args[0], scope);
     if (!t) return std::nullopt;
-    if (t->is_void() || t->is_array() || t->is_struct()) {
+    // Печатаются только числовые скаляры, bool, char и string; указатели,
+    // byte и агрегаты не имеют текстового представления.
+    if (!t->is_primitive() || t->is_void() || t->is(Primitive::Byte)) {
         error(e.args[0]->loc, "'print' accepts only scalar types or string, got '" +
                               t->to_string() + "'");
         return std::nullopt;
@@ -1475,7 +1857,19 @@ std::optional<Type> SemanticAnalyzer::check_array_lit(const ast::ArrayLit& al,
 
 std::optional<Type> SemanticAnalyzer::check_struct_lit(const ast::StructLit& sl,
                                                        Scope& scope) {
-    auto sym = scope.lookup(sl.type_name);
+    // Имя типа может быть квалифицированным: Module.Vec2, Module.NS.T.
+    const Symbol* sym = nullptr;
+    if (sl.type_name.find('.') != std::string::npos) {
+        auto parts = split_dotted(sl.type_name);
+        ChainHit hit;
+        switch (resolve_chain_parts(parts, sl.loc, scope, hit)) {
+            case ChainStatus::Error: return std::nullopt;
+            case ChainStatus::NotChain: break;
+            case ChainStatus::Found: sym = hit.sym; break;
+        }
+    } else {
+        sym = scope.lookup(sl.type_name);
+    }
     if (!sym || sym->kind != Symbol::Kind::TypeName || !sym->type.is_struct()) {
         error(sl.loc, "'" + sl.type_name + "' is not a struct type");
         return std::nullopt;
@@ -1489,15 +1883,23 @@ std::optional<Type> SemanticAnalyzer::check_struct_lit(const ast::StructLit& sl,
     }
     // Спека требует фиксированного порядка полей.
     for (std::size_t i = 0; i < st.fields.size(); ++i) {
-        const auto& expected_name = st.fields[i].first;
-        const auto& expected_type = st.fields[i].second;
-        if (sl.fields[i].name != expected_name) {
+        const auto& expected = st.fields[i];
+        if (sl.fields[i].name != expected.name) {
             error(sl.fields[i].loc, std::format(
                 "expected field '{}' at position {}, got '{}'",
-                expected_name, i, sl.fields[i].name));
+                expected.name, i, sl.fields[i].name));
             return std::nullopt;
         }
-        if (!check_expr_ctx(*sl.fields[i].value, scope, expected_type)) {
+        // Структуру с priv-полем можно сконструировать только в её методах.
+        if (expected.is_priv
+            && current_impl_type_ != sym->type.struct_ptr().get()) {
+            error(sl.fields[i].loc, std::format(
+                "field '{}' of struct '{}' is private: the literal is allowed "
+                "only inside methods of '{}'",
+                expected.name, st.name, st.name));
+            return std::nullopt;
+        }
+        if (!check_expr_ctx(*sl.fields[i].value, scope, expected.type)) {
             return std::nullopt;
         }
     }

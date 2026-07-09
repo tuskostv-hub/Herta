@@ -1,8 +1,8 @@
 // Демонстрация: обращение к приватной функции другого модуля даёт
-// ошибку компиляции "is not exported from module 'Lib'".
+// ошибку компиляции "is not exported from 'Lib'".
 //
 // Ожидаемая ошибка при компиляции:
-//   error: 'secret_helper' is not exported from module 'Lib'
+//   error: 'secret_helper' is not exported from 'Lib'
 
 module bad_private_fn;
 

@@ -1,10 +1,21 @@
 // A.1.7 Автоматический вывод типов.
 // Через := тип переменной определяется по инициализатору.
 // Поддерживаются примитивы, массивы, структуры, указатели.
+// Тип возврата функции можно опустить — он выводится по return в теле.
 
 module a1_7_type_inference;
 
 struct Point { x: int32, y: int32 }
+
+// Тип возврата выведен как int32 (по `return x * 2;`).
+fn double(x: int32) {
+    return x * 2;
+}
+
+// Без return со значением тип возврата выводится как void.
+fn shout(msg: string) {
+    print(msg);
+}
 
 fn main() int32 {
     // Целое выводится как int32
@@ -48,6 +59,10 @@ fn main() int32 {
     let ptr := &v;
     print(*ptr);
     assert(*ptr == 99);
+
+    // Функции с выведенным типом возврата.
+    assert(double(21) == 42);
+    shout("inferred void fn");
 
     print("a1.7 ok");
     return 0;

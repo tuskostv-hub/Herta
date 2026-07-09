@@ -36,6 +36,7 @@ export enum class TokenKind : std::uint8_t {
     KwModule,
     KwImport,
     KwPub,
+    KwPriv,    // приватное поле структуры
     KwTrue,
     KwFalse,
     KwNull,    // нулевой указатель
@@ -159,6 +160,7 @@ constexpr KeywordEntry kKeywords[] = {
     {"module",    TokenKind::KwModule},
     {"import",    TokenKind::KwImport},
     {"pub",       TokenKind::KwPub},
+    {"priv",      TokenKind::KwPriv},
     {"true",      TokenKind::KwTrue},
     {"false",     TokenKind::KwFalse},
     {"null",      TokenKind::KwNull},
@@ -198,6 +200,7 @@ std::string_view to_string(TokenKind k) noexcept {
         case TokenKind::KwModule: return "KwModule";
         case TokenKind::KwImport: return "KwImport";
         case TokenKind::KwPub: return "KwPub";
+        case TokenKind::KwPriv: return "KwPriv";
         case TokenKind::KwTrue: return "KwTrue";
         case TokenKind::KwFalse: return "KwFalse";
         case TokenKind::KwNull: return "KwNull";
@@ -323,8 +326,38 @@ Token Lexer::scan_identifier_or_keyword(herta::common::SourceLocation start,
     };
 }
 
+// Суффиксы размера для числовых литералов (A.1.1): 42i32, 7u8, 3.14f32 и т.п.
+namespace {
+constexpr std::string_view kIntSuffixes[] = {
+    "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+};
+constexpr std::string_view kFloatSuffixes[] = {"f32", "f64"};
+
+bool is_int_suffix(std::string_view s) noexcept {
+    for (auto v : kIntSuffixes) if (v == s) return true;
+    return false;
+}
+bool is_float_suffix(std::string_view s) noexcept {
+    for (auto v : kFloatSuffixes) if (v == s) return true;
+    return false;
+}
+}  // anonymous namespace
+
 Token Lexer::scan_number(herta::common::SourceLocation start,
                          std::size_t start_pos) {
+    // После тела литерала может идти суффикс типа. Съедает его и
+    // возвращает "": суффикса нет, сам суффикс, либо nullopt при ошибке.
+    auto scan_suffix = [&]() -> std::optional<std::string> {
+        if (!is_letter(peek())) return std::string{};
+        auto sfx_loc = current_loc();
+        std::string sfx;
+        while (!at_end() && is_letter_or_digit(peek())) sfx.push_back(advance());
+        if (is_int_suffix(sfx) || is_float_suffix(sfx)) return sfx;
+        error("invalid numeric literal suffix '" + sfx +
+              "' (expected i8..i64, u8..u64, f32 or f64)", sfx_loc);
+        return std::nullopt;
+    };
+
     // Шестнадцатеричный литерал вида "0x" + hex-цифры
     if (peek() == '0' && (peek(1) == 'x' || peek(1) == 'X')) {
         advance();  // '0'
@@ -334,6 +367,14 @@ Token Lexer::scan_number(herta::common::SourceLocation start,
             return Token{TokenKind::Invalid, {}, start};
         }
         while (!at_end() && is_hex_digit(peek())) advance();
+        // Суффикс hex-литерала может начинаться только с i/u: f-суффиксы и
+        // суффиксы с a..f неотличимы от hex-цифр и потому недоступны.
+        auto sfx = scan_suffix();
+        if (!sfx) return Token{TokenKind::Invalid, {}, start};
+        if (is_float_suffix(*sfx)) {
+            error("float suffix is not allowed on hex literal", start);
+            return Token{TokenKind::Invalid, {}, start};
+        }
         return make_token(TokenKind::IntLiteral, start_pos, start);
     }
     // Двоичный литерал вида "0b" + нули и единицы
@@ -345,6 +386,12 @@ Token Lexer::scan_number(herta::common::SourceLocation start,
             return Token{TokenKind::Invalid, {}, start};
         }
         while (peek() == '0' || peek() == '1') advance();
+        auto sfx = scan_suffix();
+        if (!sfx) return Token{TokenKind::Invalid, {}, start};
+        if (is_float_suffix(*sfx)) {
+            error("float suffix is not allowed on binary literal", start);
+            return Token{TokenKind::Invalid, {}, start};
+        }
         return make_token(TokenKind::IntLiteral, start_pos, start);
     }
 
@@ -369,9 +416,21 @@ Token Lexer::scan_number(herta::common::SourceLocation start,
             }
             while (!at_end() && is_digit(peek())) advance();
         }
+        auto sfx = scan_suffix();
+        if (!sfx) return Token{TokenKind::Invalid, {}, start};
+        if (is_int_suffix(*sfx)) {
+            error("integer suffix is not allowed on float literal", start);
+            return Token{TokenKind::Invalid, {}, start};
+        }
         return make_token(TokenKind::FloatLiteral, start_pos, start);
     }
 
+    // Целый литерал; f32/f64-суффикс превращает его в вещественный (42f64).
+    auto sfx = scan_suffix();
+    if (!sfx) return Token{TokenKind::Invalid, {}, start};
+    if (is_float_suffix(*sfx)) {
+        return make_token(TokenKind::FloatLiteral, start_pos, start);
+    }
     return make_token(TokenKind::IntLiteral, start_pos, start);
 }
 
